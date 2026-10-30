@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Git &amp; GitHub, Visually</title>
+  <meta name="description" content="Learn Git and GitHub by watching commands move your files, then trying them yourself.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@600;700&family=Nunito:wght@400;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <a class="skip" href="#lessons">Skip to lessons</a>
+  <div class="page">
+    <header class="hero">
+      <p class="eyebrow">A hands-on course</p>
+      <h1>Git &amp; GitHub, visually</h1>
+      <p class="lead">Every command moves something on screen, so you can see what it did. Then you type it yourself in a safe practice terminal. Nothing to install.</p>
+    </header>
+
+    <main id="lessons" class="lesson-groups" aria-label="Lessons"></main>
+
+    <footer class="site-foot">
+      <p>Lessons marked "Coming soon" are not written yet. Use the keyboard arrows to move between slides.</p>
+    </footer>
+  </div>
+
+  <script src="js/lessons-list.js"></script>
+  <script>
+    (function () {
+      var root = document.getElementById('lessons');
+      var groups = {};
+      window.LESSON_LIST.forEach(function (l) {
+        if (!groups[l.group]) {
+          var sec = document.createElement('section');
+          var h = document.createElement('h2');
+          h.textContent = l.group;
+          var ol = document.createElement('ol');
+          ol.className = 'lesson-cards';
+          sec.appendChild(h);
+          sec.appendChild(ol);
+          root.appendChild(sec);
+          groups[l.group] = ol;
+        }
+        var li = document.createElement('li');
+        var ready = !!l.file;
+        var card = document.createElement(ready ? 'a' : 'div');
+        card.className = 'lesson-card' + (ready ? '' : ' soon');
+        if (ready) card.href = 'lesson.html?id=' + l.id;
+        var num = document.createElement('span');
+        num.className = 'lesson-num';
+        num.textContent = l.id;
+        num.setAttribute('aria-hidden', 'true');
+        var body = document.createElement('span');
+        body.className = 'lesson-body';
+        var t = document.createElement('span');
+        t.className = 'lesson-title';
+        t.textContent = l.title;
+        var b = document.createElement('span');
+        b.className = 'lesson-blurb';
+        b.textContent = l.blurb;
+        body.appendChild(t);
+        body.appendChild(b);
+        var tag = document.createElement('span');
+        tag.className = 'lesson-tag';
+        tag.textContent = ready ? 'Start' : 'Coming soon';
+        card.appendChild(num);
+        card.appendChild(body);
+        card.appendChild(tag);
+        li.appendChild(card);
+        groups[l.group].appendChild(li);
+      });
+    })();
+  </script>
+</body>
+</html>

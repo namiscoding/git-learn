@@ -1,0 +1,10 @@
+# Learner notes (local only)
+.vibe-wise/
+.sensible-vibes/
+
+# Build output from the deploy workflow
+_site/
+
+# OS and editor files
+.DS_Store
+Thumbs.db
