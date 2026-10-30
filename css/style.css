@@ -329,3 +329,28 @@ a.lesson-card .lesson-tag { background: var(--primary); color: var(--on-primary)
 .pr-review { font-weight: 700; }
 .pr-check { display: inline-block; background: var(--repo-line); color: #fff; border-radius: 50%; width: 1.4em; height: 1.4em; text-align: center; margin-right: .4em; }
 .pr-btn { display: inline-block; background: var(--repo-line); color: #fff; font-weight: 700; padding: .5rem 1.1rem; border-radius: 10px; }
+
+/* ---------- conflicts, stash shelf ---------- */
+.chip-conflict rect { fill: #fee2e2; stroke: #b91c1c; stroke-width: 3; }
+.shelf { }
+.shelf rect { fill: #fff; stroke: var(--staging-line); stroke-width: 3; }
+.item-stash rect { fill: var(--staging-bg); stroke: var(--staging-line); stroke-width: 2.5; }
+.chip-badge-left { font: 700 12.5px var(--font-body); fill: var(--muted); }
+
+/* ---------- lesson 12-14 visuals ---------- */
+.conflict-file { display: grid; gap: 4px; background: #fff; border: 3px solid var(--fg); border-radius: 16px; padding: 14px 16px; font-family: var(--font-mono); font-size: .95rem; }
+.cf-line { margin: 0; padding: 4px 8px; border-radius: 6px; overflow-wrap: anywhere; }
+.cf-marker { background: #f1f5f9; color: var(--muted); font-weight: 700; }
+.cf-ours { background: var(--saved-bg); }
+.cf-theirs { background: #dbeafe; }
+.cf-key { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 4px; font-family: var(--font-body); font-size: .92rem; }
+span.cf-ours, span.cf-theirs { padding: 0 6px; border-radius: 6px; font-weight: 700; }
+
+.story-steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.story-steps li { display: grid; gap: 2px; background: #fff; border: 3px solid var(--border); border-radius: 14px; padding: 10px 14px; }
+.story-steps span { color: var(--muted); font-size: .95rem; }
+
+.compare-graphs { display: grid; gap: 12px; }
+.compare-graphs figure { margin: 0; }
+.compare-graphs figcaption { font-weight: 700; margin-bottom: 4px; }
+.compare-graphs .mini-graph circle { r: 11; }

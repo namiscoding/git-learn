@@ -22,6 +22,8 @@
   const GRAPH_Y = ZONE_Y + ZONE_H + 74; // top of the History panel
   const LANE_H = 74;
   const LANE_X0 = 130;
+  const STASH_Y = ZONE_Y + ZONE_H + 74; // top of the stash shelf
+  const STASH_H = 96;
 
   // Remote look: two equal panels.
   const R_Y = 40;
@@ -62,7 +64,9 @@
   // Where does this file's main shape live, and what does it say?
   function chipsFor(file) {
     const chips = [];
-    if (file.staged) {
+    if (file.unmerged) {
+      chips.push({ key: file.name, zone: 0, label: 'conflict', cls: 'conflict' });
+    } else if (file.staged) {
       chips.push({ key: file.name, zone: 1, label: file.staged === 'new' ? 'new' : file.staged, cls: 'staged' });
       if (file.work) chips.push({ key: file.name + '~', zone: 0, label: 'edited again', cls: 'modified' });
     } else if (file.untracked) {
@@ -84,6 +88,7 @@
       this.container = container;
       this.remoteMode = !!(opts && opts.remote);
       this.graph = this.remoteMode || !!(opts && opts.graph);
+      this.stashMode = !!(opts && opts.stash);
       this.items = new Map();
       this.pulseTimers = [];
       this.resetLanes();
@@ -104,6 +109,7 @@
       else this.buildAreas(svg);
 
       if (this.graph && !this.remoteMode) this.buildPanel(svg);
+      if (this.stashMode) this.buildStash(svg);
       this.edgeLayer = el('g', {}, svg);
       this.itemLayer = el('g', {}, svg);
       container.appendChild(svg);
@@ -173,6 +179,17 @@
       this.arrows = this.rArrows.map((a) => a.g);
     }
 
+    // A shelf under the three areas where stashed work waits.
+    buildStash(svg) {
+      this.shelf = el('g', { class: 'shelf' }, svg);
+      el('rect', { x: 12, y: STASH_Y, width: 696, height: STASH_H, rx: 20 }, this.shelf);
+      const t = el('text', { x: 30, y: STASH_Y + 30, class: 'history-title' }, this.shelf);
+      t.textContent = 'Stash: a shelf for unfinished work';
+      this.shelfHint = el('text', { x: 360, y: STASH_Y + 68, class: 'history-hint' }, this.shelf);
+      this.shelfHint.textContent = 'Nothing on the shelf';
+      svg.setAttribute('viewBox', '0 0 ' + W + ' ' + (STASH_Y + STASH_H + 14));
+    }
+
     resetLanes() {
       this.lanes = { local: newLanes(), remote: newLanes() }; // kept so commits never jump between lanes
     }
@@ -231,6 +248,16 @@
             });
           });
         });
+      }
+
+      if (this.stashMode) {
+        (state.stashes || []).forEach((st, i) => {
+          wanted.set('stash:' + st.id, {
+            type: 'stash', stash: st, x: 30 + i * 226, y: STASH_Y + 40,
+            from: { x: ZONE_X[0] + ZONE_W / 2 - 100, y: ZONE_Y + ZONE_H - 60 }
+          });
+        });
+        this.shelfHint.style.display = (state.stashes || []).length ? 'none' : '';
       }
 
       if (this.remoteMode) {
@@ -328,6 +355,15 @@
             oid = byOid.get(oid).parents[0];
           }
         });
+      // A detached HEAD (during a rebase): its new commits continue in the rebased branch's lane.
+      if (geom.detached) {
+        const lane = lay.branchLane.has(geom.detached.branch) ? lay.branchLane.get(geom.detached.branch) : 0;
+        let oid = geom.detached.oid;
+        while (oid && byOid.has(oid) && !lay.laneOf.has(oid)) {
+          lay.laneOf.set(oid, lane);
+          oid = byOid.get(oid).parents[0];
+        }
+      }
       // Commits only origin/* knows about: continue the branch they extend, or start their own lane.
       tracking.forEach((t) => {
         const chain = [];
@@ -391,12 +427,12 @@
 
       // Labels for branches (and origin/* labels); several on one commit stack up.
       const stack = new Map();
-      const pill = (name, oid, current, remoteRef) => {
+      const pill = (name, oid, current, remoteRef, plainHead) => {
         const p = pos.get(oid);
         if (!p) return;
         const k = stack.get(oid) || 0;
         stack.set(oid, k + 1);
-        const width = Math.round((current ? name.length + 7 : name.length) * 8.8 + 24);
+        const width = Math.round((current && !plainHead ? name.length + 7 : name.length) * 8.8 + 24);
         let x;
         let y;
         if (geom.pills === 'above') {
@@ -406,10 +442,11 @@
           x = p.x + 24 + width / 2;
           y = p.y - k * 30;
         }
-        wanted.set(prefix + 'branch:' + name, { type: 'branch', name, current, remoteRef, x, y });
+        wanted.set(prefix + 'branch:' + name, { type: 'branch', name, current, remoteRef, plainHead, x, y });
       };
       branches.forEach((b) => pill(b.name, b.oid, !!head && b.name === head, false));
       tracking.forEach((t) => pill(t.name, t.oid, false, true));
+      if (geom.detached) pill('HEAD', geom.detached.oid, true, false, true);
 
       const used = commits.map(laneUsed);
       return { pos, lanes: used.length ? Math.max(...used) + 1 : 1, lay };
@@ -444,7 +481,8 @@
         lineX1: 28, lineX2: 692,
         from: () => ({ x: ZONE_X[1] + ZONE_W / 2, y: ZONE_Y + ZONE_H })
       };
-      const r = this.layoutSide(this.lanes.local, state.allCommits || [], state.branches || [], state.head, [], geom, wanted, '');
+      geom.detached = state.detachedOid ? { oid: state.detachedOid, branch: state.head } : null;
+      const r = this.layoutSide(this.lanes.local, state.allCommits || [], state.branches || [], state.detachedOid ? null : state.head, [], geom, wanted, '');
       const panelH = 112 + r.lanes * LANE_H - 38;
       this.panelRect.setAttribute('height', panelH);
       this.svg.setAttribute('viewBox', '0 0 ' + W + ' ' + (GRAPH_Y + panelH + 14));
@@ -461,11 +499,12 @@
         labelAnchor: 'end', labelDy: 28
       });
       const gL = mk(0);
+      gL.detached = state.detachedOid ? { oid: state.detachedOid, branch: state.head } : null;
       const gR = mk(1);
       const wl = new Map();
       const wr = new Map();
       const remote = state.remote || { branches: [], allCommits: [] };
-      const L = this.layoutSide(this.lanes.local, state.allCommits || [], state.branches || [], state.head, state.tracking || [], gL, wl, 'L:');
+      const L = this.layoutSide(this.lanes.local, state.allCommits || [], state.branches || [], state.detachedOid ? null : state.head, state.tracking || [], gL, wl, 'L:');
       const R = this.layoutSide(this.lanes.remote, remote.allCommits, remote.branches, null, [], gR, wr, 'R:');
       // A commit that exists on the other side glides in from there (that is a push, pull or clone).
       wl.forEach((w, key) => {
@@ -507,7 +546,11 @@
     create(w) {
       if (w.type === 'edge') return el('path', { class: 'edge' });
       const g = el('g', { class: 'item item-' + w.type });
-      if (w.type === 'branch') {
+      if (w.type === 'stash') {
+        el('rect', { width: 208, height: 44, rx: 12 }, g);
+        g._name = el('text', { x: 12, y: 19, class: 'chip-name' }, g);
+        g._sub = el('text', { x: 12, y: 37, class: 'chip-badge-left' }, g);
+      } else if (w.type === 'branch') {
         g._rect = el('rect', { y: -13, height: 26, rx: 13 }, g);
         g._text = el('text', { x: 0, y: 5, class: 'tag-text' }, g);
       } else if (w.type === 'chip') {
@@ -530,8 +573,14 @@
 
     update(g, w) {
       const shown = g.classList.contains('shown') ? ' shown' : '';
+      if (w.type === 'stash') {
+        g._name.textContent = w.stash.label;
+        g._sub.textContent = w.stash.files + (w.stash.files === 1 ? ' file saved' : ' files saved');
+        g.setAttribute('class', 'item item-stash' + shown);
+        return;
+      }
       if (w.type === 'branch') {
-        const label = w.current ? 'HEAD → ' + w.name : w.name;
+        const label = w.current && !w.plainHead ? 'HEAD → ' + w.name : w.name;
         const width = Math.round(label.length * 8.8 + 24);
         g._text.textContent = label;
         g._rect.setAttribute('x', -width / 2);

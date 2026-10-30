@@ -195,7 +195,7 @@
         const visual = h('div', { class: 'slide-visual' });
         const diagramBox = h('div', { class: 'diagram-box' });
         visual.appendChild(diagramBox);
-        this.diagram = new GitDiagram(diagramBox, { graph: !!slide.graph, remote: !!slide.remote });
+        this.diagram = new GitDiagram(diagramBox, { graph: !!slide.graph, remote: !!slide.remote, stash: !!slide.stash });
 
         if (slide.type !== 'practice') {
           this.cmdLine = h('p', { class: 'cmd-line', 'aria-hidden': 'true' });

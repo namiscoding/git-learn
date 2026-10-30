@@ -29,6 +29,8 @@
     '  git branch [name]           list branches, or create one',
     '  git switch [-c] <branch>    move to a branch (-c creates it)',
     '  git merge <branch>          bring a branch into the current one',
+    '  git stash [pop|list]        set unfinished work aside, and bring it back',
+    '  git rebase <branch>         replay your commits on top of another branch',
     '  git restore [--staged] <f>  undo changes to a file',
     '  git reset [--soft|--hard] <commit>   move the branch back',
     '  git revert HEAD             undo a commit by adding a new one',
@@ -217,6 +219,15 @@
       this.fs = null;
       this.pfs = null;
       this.initialized = false;
+      this.clearWorkState();
+    }
+
+    // Things that live only while a merge, rebase or stash is going on.
+    clearWorkState() {
+      this.merge = null; // a merge waiting to be concluded
+      this.rebase = null; // a rebase that stopped on a conflict
+      this.unmerged = new Map(); // path -> "both modified", "deleted by us", ...
+      this.stashes = []; // newest first
     }
 
     // Start over with an empty folder. Await this before running commands.
@@ -230,6 +241,7 @@
       await this.pfs.mkdir(REMOTE_DIR);
       await git.init({ fs: this.fs, dir: REMOTE_DIR, defaultBranch: 'main' });
       this.initialized = false;
+      this.clearWorkState();
     }
 
     get remoteArgs() {
@@ -282,6 +294,23 @@
       state.files = matrix.map(describe).sort((a, b) => (a.name < b.name ? -1 : 1));
       state.head = (await git.currentBranch({ ...this.gitArgs, fullname: false })) || 'main';
       state.branch = state.head;
+      if (this.rebase) {
+        // HEAD is detached while a rebase is replaying commits.
+        state.head = this.rebase.branch;
+        state.detachedOid = await this.headOid();
+      }
+      this.unmerged.forEach((kind, name) => {
+        let f = state.files.find((x) => x.name === name);
+        if (!f) {
+          f = { name, h: 0, w: 2, s: 0 };
+          state.files.push(f);
+        }
+        Object.assign(f, { staged: null, work: null, untracked: false, unmerged: kind });
+      });
+      state.files.sort((a, b) => (a.name < b.name ? -1 : 1));
+      state.merging = !!this.merge;
+      state.rebasing = !!this.rebase;
+      state.stashes = this.stashes.map((e, i) => ({ id: e.id, label: 'stash@{' + i + '}', text: this.stashLabel(e), files: e.files.length + e.untracked.length }));
       const entry = (e) => ({
         oid: e.oid,
         short: e.oid.slice(0, 7),
@@ -303,6 +332,9 @@
           if (!seen.has(e.oid)) seen.set(e.oid, entry(e));
         }
       }
+      // Commits on the current (possibly detached) HEAD count too, and allCommits is always set.
+      state.commits.forEach((c) => { if (!seen.has(c.oid)) seen.set(c.oid, c); });
+      state.allCommits = Array.from(seen.values());
 
       // Remote-tracking branches (origin/main) and the pretend GitHub repository.
       const remotes = await git.listRemotes(this.gitArgs);
@@ -456,7 +488,7 @@
       if (!sub) return ok('git', 'usage: git <command>. Type help to see the commands used in this course.');
       if (sub === 'init') return this.gitInit();
       if (sub === 'clone') return this.gitClone(args.slice(1));
-      const supported = ['status', 'add', 'commit', 'log', 'diff', 'branch', 'switch', 'checkout', 'merge', 'restore', 'reset', 'revert', 'rm', 'remote', 'push', 'pull', 'fetch', 'clone'];
+      const supported = ['status', 'add', 'commit', 'log', 'diff', 'branch', 'switch', 'checkout', 'merge', 'restore', 'reset', 'revert', 'rm', 'remote', 'push', 'pull', 'fetch', 'clone', 'stash', 'rebase'];
       if (supported.indexOf(sub) === -1) {
         return fail('git', "git: '" + sub + "' is not part of this course yet. Type help to see what works.");
       }
@@ -474,6 +506,8 @@
       if (sub === 'reset') return this.gitReset(args.slice(1));
       if (sub === 'revert') return this.gitRevert(args.slice(1));
       if (sub === 'rm') return this.gitRm(args.slice(1));
+      if (sub === 'stash') return this.gitStash(args.slice(1));
+      if (sub === 'rebase') return this.gitRebase(args.slice(1));
       if (sub === 'remote') return this.gitRemote(args.slice(1));
       if (sub === 'push') return this.gitPush(args.slice(1));
       if (sub === 'pull') return this.gitPull(args.slice(1));
@@ -497,29 +531,73 @@
     }
 
     statusText(state) {
-      const lines = ['On branch ' + state.head];
+      const lines = [];
+      const rb = this.rebase;
+      const noCommits = state.commits.length === 0;
+      const unmerged = state.files.filter((f) => f.unmerged);
+      const staged = state.files.filter((f) => f.staged);
+      const unstaged = state.files.filter((f) => f.work);
+      const untracked = state.files.filter((f) => f.untracked);
+
+      if (rb) {
+        const short = rb.onto.slice(0, 7);
+        const stopped = rb.todo[0];
+        const doneCount = rb.done.length + (stopped && rb.stopped === stopped ? 1 : 0);
+        const next = rb.todo.slice(rb.stopped === stopped ? 1 : 0);
+        lines.push('interactive rebase in progress; onto ' + short);
+        if (doneCount) {
+          lines.push('Last command done (' + plural(doneCount, 'command') + ' done):');
+          lines.push('   pick ' + (stopped ? stopped.short + ' ' + stopped.message.split('\n')[0] : ''));
+        }
+        if (next.length) {
+          lines.push('Next commands to do (' + plural(next.length, 'remaining command') + '):');
+          next.slice(0, 2).forEach((c) => lines.push('   pick ' + c.short + ' ' + c.message.split('\n')[0]));
+          lines.push('  (use "git rebase --edit-todo" to view and edit)');
+        } else {
+          lines.push('No commands remaining.');
+        }
+        lines.push("You are currently rebasing branch '" + rb.branch + "' on '" + short + "'.");
+        if (unmerged.length) {
+          lines.push('  (fix conflicts and then run "git rebase --continue")',
+            '  (use "git rebase --skip" to skip this patch)',
+            '  (use "git rebase --abort" to check out the original branch)');
+        } else {
+          lines.push('  (all conflicts fixed: run "git rebase --continue")');
+        }
+      } else {
+        lines.push('On branch ' + state.head);
+      }
       const up = state.upstream;
-      if (up) {
+      if (up && !rb) {
         const n = (k) => k + ' commit' + (k === 1 ? '' : 's');
         if (!up.ahead && !up.behind) lines.push("Your branch is up to date with '" + up.ref + "'.");
         else if (up.ahead && !up.behind) lines.push("Your branch is ahead of '" + up.ref + "' by " + n(up.ahead) + '.', '  (use "git push" to publish your local commits)');
         else if (!up.ahead && up.behind) lines.push("Your branch is behind '" + up.ref + "' by " + n(up.behind) + ', and can be fast-forwarded.', '  (use "git pull" to update your local branch)');
         else lines.push("Your branch and '" + up.ref + "' have diverged,", 'and have ' + up.ahead + ' and ' + up.behind + ' different commits each, respectively.', '  (use "git pull" if you want to integrate the remote branch with yours)');
       }
-      const noCommits = state.commits.length === 0;
-      if (noCommits) lines.push('', 'No commits yet');
+      if (this.merge) {
+        lines.push('');
+        if (unmerged.length) {
+          lines.push('You have unmerged paths.', '  (fix conflicts and run "git commit")', '  (use "git merge --abort" to abort the merge)');
+        } else {
+          lines.push('All conflicts fixed but you are still merging.', '  (use "git commit" to conclude merge)');
+        }
+      }
+      if (noCommits && !rb) lines.push('', 'No commits yet');
 
-      const staged = state.files.filter((f) => f.staged);
-      const unstaged = state.files.filter((f) => f.work);
-      const untracked = state.files.filter((f) => f.untracked);
       const label = { new: 'new file:   ', modified: 'modified:   ', deleted: 'deleted:    ' };
-
       if (staged.length) {
         lines.push('', 'Changes to be committed:');
         lines.push(noCommits
           ? '  (use "git rm --cached <file>..." to unstage)'
           : '  (use "git restore --staged <file>..." to unstage)');
         staged.forEach((f) => lines.push('\t' + label[f.staged] + f.name));
+      }
+      if (unmerged.length) {
+        lines.push('', 'Unmerged paths:');
+        if (rb || !this.merge) lines.push('  (use "git restore --staged <file>..." to unstage)');
+        lines.push('  (use "git add <file>..." to mark resolution)');
+        unmerged.forEach((f) => lines.push('\t' + (f.unmerged + ':').padEnd(17) + f.name));
       }
       if (unstaged.length) {
         lines.push('', 'Changes not staged for commit:');
@@ -534,7 +612,7 @@
       }
       if (!staged.length) {
         lines.push('');
-        if (unstaged.length) lines.push('no changes added to commit (use "git add" and/or "git commit -a")');
+        if (unmerged.length || unstaged.length) lines.push('no changes added to commit (use "git add" and/or "git commit -a")');
         else if (untracked.length) lines.push('nothing added to commit but untracked files present (use "git add" to track)');
         else if (noCommits) lines.push('nothing to commit (create/copy files and use "git add" to track)');
         else lines.push('nothing to commit, working tree clean');
@@ -554,8 +632,8 @@
           matrix.map(describe).forEach((f) => {
             if (f.untracked || f.work) targets.push(f.name);
           });
-        } else if ((await this.fileExists(p)) || known.has(p)) {
-          if (!known.has(p) && (await git.isIgnored({ ...this.gitArgs, filepath: p }))) {
+        } else if ((await this.fileExists(p)) || known.has(p) || this.unmerged.has(p)) {
+          if (!known.has(p) && !this.unmerged.has(p) && (await git.isIgnored({ ...this.gitArgs, filepath: p }))) {
             return fail('add',
               'The following paths are ignored by one of your .gitignore files:\n' + p + '\n' +
               'hint: Use -f if you really want to add them.\n' +
@@ -570,7 +648,9 @@
       for (const name of new Set(targets)) {
         if (await this.fileExists(name)) await git.add({ ...this.gitArgs, filepath: name });
         else await git.remove({ ...this.gitArgs, filepath: name });
+        this.unmerged.delete(name); // adding a conflicted file marks it as resolved
       }
+      if (paths.some((x) => x === '.' || x === '-A' || x === '--all')) this.unmerged.clear();
       return ok('add');
     }
 
@@ -594,6 +674,11 @@
           return fail('commit', "error: this course does not support the option '" + a + "' yet");
         }
       }
+
+      if (this.rebase) {
+        return fail('commit', 'fatal: You are in the middle of a rebase. Resolve the conflict, then run: git rebase --continue');
+      }
+      if (this.merge || this.unmerged.size) return this.commitMerge(message);
 
       if (all) {
         const matrix = await git.statusMatrix(this.gitArgs);
@@ -715,6 +800,9 @@
     }
 
     async gitDiff(flags) {
+      if (this.unmerged.size) {
+        return fail('diff', 'This course does not show the combined diff of conflicted files yet.\nUse cat <file> to see the conflict markers instead.');
+      }
       const staged = flags.includes('--staged') || flags.includes('--cached');
       const bad = flags.filter((f) => f !== '--staged' && f !== '--cached');
       if (bad.length) return fail('diff', "fatal: this course does not support '" + bad[0] + "' yet");
@@ -860,7 +948,7 @@
     // Tracked files with uncommitted changes (staged or not).
     async dirtyFiles() {
       const state = await this.getState();
-      return state.files.filter((f) => f.staged || f.work).map((f) => f.name);
+      return state.files.filter((f) => f.staged || f.work || f.unmerged).map((f) => f.name);
     }
 
     /* ----- branches ----- */
@@ -898,7 +986,9 @@
       if (unknown.length) return fail('branch', "error: this course does not support the option '" + unknown[0] + "' yet");
 
       if (!names.length) {
-        const lines = state.branches.map((b) => (b.name === state.head ? '* ' : '  ') + b.name);
+        const lines = this.rebase
+          ? ['* (no branch, rebasing ' + state.head + ')'].concat(state.branches.map((b) => '  ' + b.name))
+          : state.branches.map((b) => (b.name === state.head ? '* ' : '  ') + b.name);
         return ok('branch', lines.join('\n'));
       }
       const name = names[0];
@@ -917,6 +1007,8 @@
       if (bad.length) return fail('switch', "error: this course does not support the option '" + bad[0] + "' yet");
       if (!names.length) return fail('switch', cmd === 'switch' ? 'fatal: missing branch or commit argument' : 'fatal: this course needs a branch name after git checkout');
       const target = names[0];
+      if (this.unmerged.size || this.merge) return fail('switch', 'error: you need to resolve your current index first');
+      if (this.rebase) return fail('switch', 'fatal: You are in the middle of a rebase. Finish it first: git rebase --continue (or --abort)');
       const state = await this.getState();
       const exists = state.branches.some((b) => b.name === target);
 
@@ -957,53 +1049,20 @@
     /* ----- merging ----- */
 
     async gitMerge(args) {
+      if (args.includes('--abort')) return this.mergeAbort();
+      if (args.includes('--continue')) return this.commitMerge(null);
+      const noFf = args.includes('--no-ff');
       const names = args.filter((a) => a[0] !== '-');
-      const flags = args.filter((a) => a[0] === '-');
+      const flags = args.filter((a) => a[0] === '-' && a !== '--no-ff');
       if (flags.length) return fail('merge', "error: this course does not support the option '" + flags[0] + "' yet");
+      if (this.merge) return fail('merge', 'fatal: You have not concluded your merge (MERGE_HEAD exists).\nPlease, commit your changes before you merge.');
+      if (this.rebase) return fail('merge', 'fatal: You are in the middle of a rebase. Finish it first: git rebase --continue (or --abort)');
       if (!names.length) return fail('merge', 'fatal: specify a branch to merge');
       const target = names[0];
       const state = await this.getState();
       const theirs = state.branches.find((b) => b.name === target) || (state.tracking || []).find((t) => t.name === target);
       if (!theirs) return fail('merge', 'merge: ' + target + ' - not something we can merge');
-      return this.performMerge(state, theirs.oid, "Merge branch '" + target + "'");
-    }
-
-    // Bring the commit `theirsOid` into the current branch (used by merge and pull).
-    async performMerge(state, theirsOid, message) {
-      const oursOid = state.commits[0] && state.commits[0].oid;
-      if (!oursOid) return fail('merge', 'fatal: there is nothing to merge into yet');
-      if (await this.isAncestor(theirsOid, oursOid)) return ok('merge', 'Already up to date.');
-
-      const before = await this.snapshot(oursOid);
-      const after = await this.snapshot(theirsOid);
-      const touched = Array.from(new Set([...before.keys(), ...after.keys()])).filter((p) => before.get(p) !== after.get(p));
-      const dirty = (await this.dirtyFiles()).filter((f) => touched.includes(f));
-      if (dirty.length) {
-        return fail('merge',
-          'error: Your local changes to the following files would be overwritten by merge:\n' +
-          dirty.map((f) => '\t' + f).join('\n') + '\n' +
-          'Please commit your changes or stash them before you merge.\nAborting');
-      }
-
-      const fastForward = await this.isAncestor(oursOid, theirsOid);
-      try {
-        await git.merge({
-          ...this.gitArgs, ours: state.head, theirs: theirsOid,
-          author: AUTHOR, message, fastForwardOnly: false
-        });
-      } catch (e) {
-        const files = (e && e.data && e.data.filepaths) || [];
-        return fail('merge',
-          files.map((f) => 'CONFLICT (content): Merge conflict in ' + f).join('\n') +
-          '\nAutomatic merge failed; fix conflicts and then commit the result.');
-      }
-      await git.checkout({ ...this.gitArgs, ref: state.head });
-      const newTip = await this.headOid();
-      const stat = await this.changeSummary(before, await this.snapshot(newTip));
-      const head = fastForward
-        ? 'Updating ' + oursOid.slice(0, 7) + '..' + newTip.slice(0, 7) + '\nFast-forward'
-        : "Merge made by the 'ort' strategy.";
-      return ok('merge', head + (stat ? '\n' + stat : ''));
+      return this.performMerge(state, theirs.oid, { label: target, noFf });
     }
 
     /* ----- undoing ----- */
@@ -1141,7 +1200,7 @@
       if (flags.some((f) => f !== '--cached')) return fail('rm', "error: this course does not support the option '" + flags.find((f) => f !== '--cached') + "' yet");
       if (!paths.length) return fail('rm', 'fatal: No pathspec was given. Which files should I remove?');
       const state = await this.getState();
-      const tracked = new Set(state.files.filter((f) => f.s !== 0).map((f) => f.name));
+      const tracked = new Set(state.files.filter((f) => f.s !== 0 || f.unmerged).map((f) => f.name));
       for (const p of paths) {
         if (!tracked.has(p)) return fail('rm', "fatal: pathspec '" + p + "' did not match any files");
       }
@@ -1149,6 +1208,7 @@
       for (const p of paths) {
         await git.remove({ ...this.gitArgs, filepath: p });
         if (!cached && (await this.fileExists(p))) await this.pfs.unlink(DIR + '/' + p);
+        this.unmerged.delete(p);
         out.push("rm '" + p + "'");
       }
       return ok('rm', out.join('\n'));
@@ -1255,7 +1315,8 @@
       const flags = args.filter((a) => a[0] === '-');
       const rest = args.filter((a) => a[0] !== '-');
       const setUp = flags.includes('-u') || flags.includes('--set-upstream');
-      const bad = flags.filter((f) => f !== '-u' && f !== '--set-upstream');
+      const force = flags.includes('-f') || flags.includes('--force') || flags.includes('--force-with-lease');
+      const bad = flags.filter((f) => !['-u', '--set-upstream', '-f', '--force', '--force-with-lease'].includes(f));
       if (bad.length) return fail('push', "error: this course does not support the option '" + bad[0] + "' yet");
       const remote = await this.primaryRemote();
       if (!remote) {
@@ -1298,10 +1359,12 @@
         await git.writeRef({ ...this.gitArgs, ref: 'refs/remotes/' + remote.remote + '/' + branch, value: localTip, force: true });
         return ok('push', 'Everything up-to-date' + trackLine);
       }
+      let forced = false;
       if (remoteTip) {
         const known = await this.hasObject(this.gitArgs, remoteTip);
         const ahead = known && (await this.isAncestor(remoteTip, localTip));
-        if (!ahead) {
+        forced = force && !ahead;
+        if (!ahead && !force) {
           const why = known ? 'non-fast-forward' : 'fetch first';
           const hint = known
             ? "hint: Updates were rejected because the tip of your current branch is behind\nhint: its remote counterpart. If you want to integrate the remote changes,\nhint: use 'git pull' before pushing again.\nhint: See the 'Note about fast-forwards' in 'git push --help' for details."
@@ -1315,9 +1378,11 @@
       await git.writeRef({ ...this.remoteArgs, ref: 'refs/heads/' + branch, value: localTip, force: true });
       await git.writeRef({ ...this.gitArgs, ref: 'refs/remotes/' + remote.remote + '/' + branch, value: localTip, force: true });
       await setTracking();
-      const change = remoteTip
-        ? '   ' + remoteTip.slice(0, 7) + '..' + localTip.slice(0, 7) + '  ' + branch + ' -> ' + branch
-        : ' * [new branch]      ' + branch + ' -> ' + branch;
+      const change = forced
+        ? ' + ' + remoteTip.slice(0, 7) + '...' + localTip.slice(0, 7) + ' ' + branch + ' -> ' + branch + ' (forced update)'
+        : remoteTip
+          ? '   ' + remoteTip.slice(0, 7) + '..' + localTip.slice(0, 7) + '  ' + branch + ' -> ' + branch
+          : ' * [new branch]      ' + branch + ' -> ' + branch;
       return ok('push', [
         'Enumerating objects: ' + count + ', done.',
         'Writing objects: 100% (' + count + '/' + count + '), done.',
@@ -1356,6 +1421,8 @@
     }
 
     async gitPull(args) {
+      const useRebase = args.includes('--rebase') || args.includes('-r');
+      args = args.filter((a) => a !== '--rebase' && a !== '-r');
       const bad = args.filter((a) => a[0] === '-');
       if (bad.length) return fail('pull', "error: this course does not support the option '" + bad[0] + "' yet");
       const remote = await this.primaryRemote();
@@ -1385,7 +1452,11 @@
       if (!state.commits.length) {
         return fail('pull', 'This course needs at least one local commit before pull.');
       }
-      const merged = await this.performMerge(state, theirs, "Merge branch '" + branch + "' of " + remote.url.replace(/\.git$/, ''));
+      const merged = useRebase
+        ? await this.rebaseStart(state, theirs, remote.remote + '/' + branch)
+        : await this.performMerge(state, theirs, {
+          label: branch, markerLabel: theirs, suffix: ' of ' + remote.url.replace(/\.git$/, '')
+        });
       return { ok: merged.ok, kind: 'pull', out: fetched.concat(merged.out ? [merged.out] : []).join('\n') };
     }
 

@@ -14,7 +14,7 @@ window.LESSON_LIST = [
   { id: '09', group: 'Fundamentals', title: 'Undoing mistakes', blurb: 'restore, reset, revert, and what each really changes.', file: '09-undoing' },
   { id: '10', group: 'Fundamentals', title: 'Remotes: push and pull', blurb: 'Another copy of your repository, somewhere else.', file: '10-remotes' },
   { id: '11', group: 'Fundamentals', title: 'Pull requests', blurb: 'Propose a change and get it reviewed.', file: '11-pull-requests' },
-  { id: '12', group: 'A little advanced', title: 'Merge conflicts', blurb: 'What to do when two edits collide.', file: null },
-  { id: '13', group: 'A little advanced', title: 'Stash', blurb: 'Set work aside and come back to it.', file: null },
-  { id: '14', group: 'A little advanced', title: 'Rebase', blurb: 'Replay your changes on a new starting point.', file: null }
+  { id: '12', group: 'A little advanced', title: 'Merge conflicts', blurb: 'What to do when two edits collide.', file: '12-merge-conflicts' },
+  { id: '13', group: 'A little advanced', title: 'Stash', blurb: 'Set work aside and come back to it.', file: '13-stash' },
+  { id: '14', group: 'A little advanced', title: 'Rebase', blurb: 'Replay your changes on a new starting point.', file: '14-rebase' }
 ];
