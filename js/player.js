@@ -195,7 +195,7 @@
         const visual = h('div', { class: 'slide-visual' });
         const diagramBox = h('div', { class: 'diagram-box' });
         visual.appendChild(diagramBox);
-        this.diagram = new GitDiagram(diagramBox, { graph: !!slide.graph });
+        this.diagram = new GitDiagram(diagramBox, { graph: !!slide.graph, remote: !!slide.remote });
 
         if (slide.type !== 'practice') {
           this.cmdLine = h('p', { class: 'cmd-line', 'aria-hidden': 'true' });
@@ -221,13 +221,22 @@
       const token = this.token;
       await this.engine.reset();
       if (token !== this.token) return;
-      for (const cmd of slide.setup || []) await this.engine.run(cmd);
+      for (const item of slide.setup || []) await this.runSetup(item);
       if (token !== this.token) return;
       const state = await this.engine.getState();
       if (token !== this.token) return;
       this.diagram.clear();
       this.diagram.render(state, {});
       if (slide.type === 'step') this.initStepControls(slide);
+    }
+
+    // A setup item is a command string, or an object for something that happens elsewhere.
+    async runSetup(item) {
+      if (typeof item === 'string') return this.engine.run(item);
+      if (item.seedRemote) return this.engine.seedRemote(item.seedRemote.url, item.seedRemote.commits);
+      if (item.teammate) return this.engine.remoteCommit(item.teammate);
+      if (item.githubMerge) return this.engine.remoteMerge(item.githubMerge.head, item.githubMerge.base);
+      return null;
     }
 
     async execute(cmd, token) {
@@ -264,7 +273,26 @@
       }
     }
 
+    // A step that is not a command: a teammate pushes, or someone clicks a button on GitHub.
+    async playRemoteStep(step, token) {
+      this.cmdOut.textContent = '';
+      this.cmdLine.textContent = '# ' + step.label;
+      this.cmdOut.classList.remove('empty');
+      await wait(reduceMotion ? 0 : 700);
+      if (token !== this.token) return false;
+      await this.runSetup(step);
+      if (token !== this.token) return false;
+      const state = await this.engine.getState();
+      if (token !== this.token) return false;
+      this.diagram.render(state, { pulse: 'github' });
+      this.cmdOut.textContent = step.output || 'This happened on GitHub, not on your computer.';
+      this.cmdOut.classList.add('empty');
+      this.caption.textContent = step.caption;
+      return true;
+    }
+
     async playStep(step, token) {
+      if (!step.cmd) return this.playRemoteStep(step, token);
       await this.typeCommand(step.cmd, token);
       if (token !== this.token) return false;
       const done = await this.execute(step.cmd, token);
@@ -358,7 +386,11 @@
       const resetBtn = h('button', { class: 'btn btn-secondary btn-small', type: 'button', text: 'Reset practice' });
       const status = h('p', { class: 'practice-status', role: 'status' });
       text.appendChild(taskList);
-      text.appendChild(h('div', { class: 'controls' }, [hintBtn, resetBtn]));
+      let githubBtn = null;
+      if (slide.githubButton) {
+        githubBtn = h('button', { class: 'btn btn-primary btn-small', type: 'button', text: slide.githubButton.label });
+      }
+      text.appendChild(h('div', { class: 'controls' }, [githubBtn, hintBtn, resetBtn]));
       text.appendChild(hint);
       text.appendChild(status);
 
@@ -392,17 +424,33 @@
         hintBtn.textContent = hint.hidden ? 'Show a hint' : 'Hide hint';
       };
 
-      this.terminal = new GitTerminal(termBox, this.engine, {
-        onResult: async (line, result) => {
-          const token = this.token;
-          const state = await this.engine.getState();
-          if (token !== this.token) return;
-          this.diagram.render(state, { pulse: result.ok ? result.kind : null });
-          // Tasks tick off in order, judged by the command that just ran.
-          while (current < slide.tasks.length && slide.tasks[current].done(state, result, line)) current++;
-          refresh();
-        }
-      });
+      const evaluate = async (line, result) => {
+        const token = this.token;
+        const state = await this.engine.getState();
+        if (token !== this.token) return;
+        this.diagram.render(state, { pulse: result.ok ? result.kind : null });
+        // Tasks tick off in order, judged by the command that just ran.
+        while (current < slide.tasks.length && slide.tasks[current].done(state, result, line)) current++;
+        refresh();
+      };
+
+      this.terminal = new GitTerminal(termBox, this.engine, { onResult: evaluate });
+
+      if (githubBtn) {
+        githubBtn.onclick = async () => {
+          const g = slide.githubButton;
+          githubBtn.disabled = true;
+          try {
+            await this.engine.remoteMerge(g.head, g.base);
+            this.terminal.print('(on GitHub) Pull request merged: ' + g.head + ' into ' + g.base + '.', 'term-note');
+            await evaluate('', { ok: true, kind: 'github', out: '' });
+          } catch (e) {
+            this.terminal.print('GitHub says: nothing to merge yet. Push your branch first.', 'term-err');
+          } finally {
+            githubBtn.disabled = false;
+          }
+        };
+      }
 
       resetBtn.onclick = async () => {
         this.token++;

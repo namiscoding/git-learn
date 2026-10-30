@@ -1,7 +1,12 @@
 /*
- * diagram.js: draws the three areas (working folder, staging area, repository) as SVG.
- * It only ever reads the state object from engine.getState(); it never decides what a
- * command did. Moving a shape between areas is a CSS transition on its transform.
+ * diagram.js: draws the repository as SVG. It only ever reads the state object from
+ * engine.getState(); it never decides what a command did. Moving a shape is a CSS
+ * transition on its transform.
+ *
+ * Three looks, chosen per slide:
+ *   default        the three areas (working folder, staging area, repository)
+ *   graph          the three areas plus a History panel with one lane per branch
+ *   remote         two panels side by side: your computer and GitHub, each a set of lanes
  */
 (function () {
   const NS = 'http://www.w3.org/2000/svg';
@@ -17,6 +22,13 @@
   const GRAPH_Y = ZONE_Y + ZONE_H + 74; // top of the History panel
   const LANE_H = 74;
   const LANE_X0 = 130;
+
+  // Remote look: two equal panels.
+  const R_Y = 40;
+  const R_W = 340;
+  const R_X = [12, 368];
+  const R_LANE0 = 158; // first lane, measured from the panel top
+  const R_LANE_H = 100;
 
   const ZONES = [
     { key: 'working', title: 'Working folder', sub: 'files you edit' },
@@ -39,6 +51,14 @@
     return name.length > 11 ? name.slice(0, 10) + '…' : name;
   }
 
+  function plural(n, w) {
+    return n + ' ' + w + (n === 1 ? '' : 's');
+  }
+
+  function newLanes() {
+    return { laneOf: new Map(), branchLane: new Map(), laneName: ['main'], maxLane: 0 };
+  }
+
   // Where does this file's main shape live, and what does it say?
   function chipsFor(file) {
     const chips = [];
@@ -55,16 +75,23 @@
     return chips;
   }
 
+  const EMPTY = { initialized: false, files: [], commits: [], branches: [], allCommits: [], tracking: [], remote: null };
+
   class Diagram {
-    // opts.graph: draw commits as one lane per branch (lessons about branches and merging).
+    // opts.graph: add a History panel with one lane per branch.
+    // opts.remote: show your computer and GitHub side by side (implies lanes).
     constructor(container, opts) {
       this.container = container;
-      this.graph = !!(opts && opts.graph);
+      this.remoteMode = !!(opts && opts.remote);
+      this.graph = this.remoteMode || !!(opts && opts.graph);
       this.items = new Map();
       this.pulseTimers = [];
       this.resetLanes();
 
-      const svg = el('svg', { viewBox: '0 0 ' + W + ' ' + H, role: 'img', class: 'diagram-svg' });
+      const svg = el('svg', {
+        viewBox: '0 0 ' + W + ' ' + H, role: 'img',
+        class: 'diagram-svg' + (this.remoteMode ? ' remote-mode' : '')
+      });
       this.svg = svg;
       const defs = el('defs', {}, svg);
       const marker = el('marker', {
@@ -73,6 +100,17 @@
       }, defs);
       el('path', { d: 'M0 0 L10 5 L0 10 z', class: 'arrow-head' }, marker);
 
+      if (this.remoteMode) this.buildRemote(svg);
+      else this.buildAreas(svg);
+
+      if (this.graph && !this.remoteMode) this.buildPanel(svg);
+      this.edgeLayer = el('g', {}, svg);
+      this.itemLayer = el('g', {}, svg);
+      container.appendChild(svg);
+      this.render(EMPTY, {});
+    }
+
+    buildAreas(svg) {
       this.zoneEls = ZONES.map((z, i) => {
         const g = el('g', { class: 'zone zone-' + z.key }, svg);
         el('rect', { x: ZONE_X[i], y: ZONE_Y, width: ZONE_W, height: ZONE_H, rx: 20 }, g);
@@ -107,19 +145,36 @@
         t.textContent = a.label;
         return g;
       });
+    }
 
-      if (this.graph) this.buildPanel(svg);
-      this.edgeLayer = el('g', {}, svg);
-      this.itemLayer = el('g', {}, svg);
-      container.appendChild(svg);
-      this.render({ initialized: false, files: [], commits: [], branches: [], allCommits: [] }, {});
+    // Two panels: your computer (left) and GitHub (right), with arrows underneath.
+    buildRemote(svg) {
+      this.rPanels = ['Your computer', 'GitHub (the remote)'].map((title, i) => {
+        const g = el('g', { class: 'remote-panel remote-panel-' + (i ? 'github' : 'local') }, svg);
+        const rect = el('rect', { x: R_X[i], y: R_Y, width: R_W, rx: 20 }, g);
+        const t = el('text', { x: R_X[i] + R_W / 2, y: R_Y + 32, class: 'zone-title' }, g);
+        t.textContent = title;
+        const s = el('text', { x: R_X[i] + R_W / 2, y: R_Y + 54, class: 'zone-sub' }, g);
+        s.textContent = i ? 'a copy on a website' : 'your repository';
+        const hint = el('text', { x: R_X[i] + R_W / 2, y: R_Y + 110, class: 'history-hint' }, g);
+        const lanes = el('g', {}, g);
+        return { g, rect, hint, lanes, laneEls: [] };
+      });
+      this.rArrows = [
+        { label: 'git push', dir: 1 },
+        { label: 'git fetch / pull / clone', dir: -1 }
+      ].map((a) => {
+        const g = el('g', { class: 'arrow' }, svg);
+        const path = el('path', { 'marker-end': 'url(#arrow-head)' }, g);
+        const text = el('text', {}, g);
+        text.textContent = a.label;
+        return { g, path, text, dir: a.dir };
+      });
+      this.arrows = this.rArrows.map((a) => a.g);
     }
 
     resetLanes() {
-      this.laneOf = new Map(); // commit id -> lane, kept so commits never jump between lanes
-      this.branchLane = new Map();
-      this.laneName = ['main'];
-      this.maxLane = 0;
+      this.lanes = { local: newLanes(), remote: newLanes() }; // kept so commits never jump between lanes
     }
 
     // The "History" panel under the three areas, with one line per lane.
@@ -139,12 +194,18 @@
       this.items.forEach((it) => it.node.remove());
       this.items.clear();
       this.resetLanes();
-      this.render({ initialized: false, files: [], commits: [], branches: [], allCommits: [] }, {});
+      this.render(EMPTY, {});
     }
 
-    // Light up the arrow for a command that just ran ('add' or 'commit').
+    // Light up the arrow for a command that just ran.
     pulse(kind) {
-      const idx = kind === 'add' ? 0 : kind === 'commit' ? 1 : -1;
+      let idx = -1;
+      if (this.remoteMode) {
+        if (kind === 'push') idx = 0;
+        else if (kind === 'fetch' || kind === 'pull' || kind === 'clone' || kind === 'github') idx = 1;
+      } else {
+        idx = kind === 'add' ? 0 : kind === 'commit' ? 1 : -1;
+      }
       if (idx === -1) return;
       const node = this.arrows[idx];
       node.classList.add('active');
@@ -157,20 +218,24 @@
       const wanted = new Map();
       const perZone = [0, 0, 0];
 
-      // File shapes
-      state.files.forEach((file) => {
-        chipsFor(file).forEach((c) => {
-          const row = perZone[c.zone]++;
-          const step = c.zone === 2 ? 42 : 50;
-          wanted.set(c.key, {
-            type: 'chip', chip: c,
-            x: ZONE_X[c.zone] + (ZONE_W - CHIP_W) / 2,
-            y: ZONE_Y + 70 + row * step
+      // File shapes (the remote look has no file areas)
+      if (!this.remoteMode) {
+        state.files.forEach((file) => {
+          chipsFor(file).forEach((c) => {
+            const row = perZone[c.zone]++;
+            const step = c.zone === 2 ? 42 : 50;
+            wanted.set(c.key, {
+              type: 'chip', chip: c,
+              x: ZONE_X[c.zone] + (ZONE_W - CHIP_W) / 2,
+              y: ZONE_Y + 70 + row * step
+            });
           });
         });
-      });
+      }
 
-      if (this.graph) {
+      if (this.remoteMode) {
+        this.layoutRemote(state, wanted);
+      } else if (this.graph) {
         this.layoutGraph(state, wanted);
       } else {
         // Commit dots, oldest on the left, newest on the right.
@@ -229,36 +294,62 @@
         }
       });
 
-      this.placeholder.classList.toggle('visible', !state.initialized);
-      this.zoneEls[2].classList.toggle('inactive', !state.initialized);
+      if (!this.remoteMode) {
+        this.placeholder.classList.toggle('visible', !state.initialized);
+        this.zoneEls[2].classList.toggle('inactive', !state.initialized);
+      }
       this.svg.setAttribute('aria-label', this.describe(state));
       if (opts.pulse) this.pulse(opts.pulse);
     }
 
-    // Place every commit in its branch's lane, and add branch labels and parent links.
-    layoutGraph(state, wanted) {
-      const commits = state.allCommits || [];
+    /* ---------- lanes ---------- */
+
+    // Place commits of one repository in lanes. Returns where each commit went.
+    // geom: { x0, xMax, y0, laneH, maxSpacing, pills: 'right' | 'above', pillMinX, pillMaxX }
+    layoutSide(lay, commits, branches, head, tracking, geom, wanted, prefix) {
       const byOid = new Map(commits.map((c) => [c.oid, c]));
 
-      state.branches.forEach((b) => {
-        if (this.branchLane.has(b.name)) return;
-        const lane = b.name === 'main' ? 0 : ++this.maxLane;
-        this.branchLane.set(b.name, lane);
-        this.laneName[lane] = b.name;
+      branches.forEach((b) => {
+        if (lay.branchLane.has(b.name)) return;
+        const lane = b.name === 'main' ? 0 : ++lay.maxLane;
+        lay.branchLane.set(b.name, lane);
+        lay.laneName[lane] = b.name;
       });
       // Walk each branch down its first-parent line; the first branch to claim a commit keeps it.
-      state.branches
+      branches
         .slice()
-        .sort((a, b) => this.branchLane.get(a.name) - this.branchLane.get(b.name))
+        .sort((a, b) => lay.branchLane.get(a.name) - lay.branchLane.get(b.name))
         .forEach((b) => {
-          const lane = this.branchLane.get(b.name);
+          const lane = lay.branchLane.get(b.name);
           let oid = b.oid;
           // main (lane 0) may take over commits after a fast-forward; other lanes never steal.
-          while (oid && byOid.has(oid) && (lane === 0 || !this.laneOf.has(oid))) {
-            this.laneOf.set(oid, lane);
+          while (oid && byOid.has(oid) && (lane === 0 || !lay.laneOf.has(oid))) {
+            lay.laneOf.set(oid, lane);
             oid = byOid.get(oid).parents[0];
           }
         });
+      // Commits only origin/* knows about: continue the branch they extend, or start their own lane.
+      tracking.forEach((t) => {
+        const chain = [];
+        let oid = t.oid;
+        while (oid && byOid.has(oid) && !lay.laneOf.has(oid)) {
+          chain.push(oid);
+          oid = byOid.get(oid).parents[0];
+        }
+        if (!chain.length) return;
+        const tipOfBranch = branches.find((b) => b.oid === oid);
+        let lane;
+        if (tipOfBranch && lay.laneOf.get(oid) === lay.branchLane.get(tipOfBranch.name)) {
+          lane = lay.laneOf.get(oid);
+        } else {
+          if (!lay.branchLane.has(t.name)) {
+            lay.branchLane.set(t.name, ++lay.maxLane);
+            lay.laneName[lay.maxLane] = t.name;
+          }
+          lane = lay.branchLane.get(t.name);
+        }
+        chain.forEach((id) => lay.laneOf.set(id, lane));
+      });
 
       const col = new Map();
       const colOf = (oid) => {
@@ -271,17 +362,18 @@
       };
       commits.forEach((c) => colOf(c.oid));
       const maxCol = commits.length ? Math.max(...col.values()) : 0;
-      const spacing = Math.min(92, (540 - LANE_X0) / Math.max(1, maxCol)); // leaves room for labels on the right
-      const laneY = (lane) => GRAPH_Y + 112 + lane * LANE_H;
+      const spacing = Math.min(geom.maxSpacing, (geom.xMax - geom.x0) / Math.max(1, maxCol));
+      const laneY = (lane) => geom.y0 + lane * geom.laneH;
       const pos = new Map();
+      const laneUsed = (c) => (lay.laneOf.has(c.oid) ? lay.laneOf.get(c.oid) : 0);
 
       commits.forEach((c) => {
-        const lane = this.laneOf.has(c.oid) ? this.laneOf.get(c.oid) : 0;
-        const p = { x: LANE_X0 + col.get(c.oid) * spacing, y: laneY(lane) };
+        const lane = laneUsed(c);
+        const p = { x: geom.x0 + col.get(c.oid) * spacing, y: laneY(lane) };
         pos.set(c.oid, p);
-        wanted.set('commit:' + c.oid, {
+        wanted.set(prefix + 'commit:' + c.oid, {
           type: 'commit', commit: c, latest: true, lane, x: p.x, y: p.y,
-          from: { x: ZONE_X[1] + ZONE_W / 2, y: ZONE_Y + ZONE_H }
+          from: geom.from ? geom.from(c.oid, p) : { x: p.x, y: p.y - 50 }
         });
       });
       commits.forEach((c) => {
@@ -293,47 +385,123 @@
           const d = Math.abs(a.y - b.y) < 1 || dx < 30
             ? 'M' + a.x + ' ' + a.y + ' L' + b.x + ' ' + b.y
             : 'M' + a.x + ' ' + a.y + ' C' + (a.x + dx * 0.5) + ' ' + a.y + ',' + (b.x - dx * 0.5) + ' ' + b.y + ',' + b.x + ' ' + b.y;
-          wanted.set('edge:' + c.oid + '>' + par, { type: 'edge', d });
+          wanted.set(prefix + 'edge:' + c.oid + '>' + par, { type: 'edge', d });
         });
       });
 
-      // Branch labels sit to the right of their tip commit; several on one commit stack upward.
+      // Labels for branches (and origin/* labels); several on one commit stack up.
       const stack = new Map();
-      state.branches.forEach((b) => {
-        const p = pos.get(b.oid);
+      const pill = (name, oid, current, remoteRef) => {
+        const p = pos.get(oid);
         if (!p) return;
-        const k = stack.get(b.oid) || 0;
-        stack.set(b.oid, k + 1);
-        const current = b.name === state.head;
-        const width = Math.round((current ? b.name.length + 7 : b.name.length) * 8.8 + 24);
-        wanted.set('branch:' + b.name, {
-          type: 'branch', name: b.name, current, x: p.x + 24 + width / 2, y: p.y - k * 30
-        });
-      });
+        const k = stack.get(oid) || 0;
+        stack.set(oid, k + 1);
+        const width = Math.round((current ? name.length + 7 : name.length) * 8.8 + 24);
+        let x;
+        let y;
+        if (geom.pills === 'above') {
+          x = Math.max(geom.pillMinX + width / 2, Math.min(geom.pillMaxX - width / 2, p.x));
+          y = p.y - 38 - k * 30;
+        } else {
+          x = p.x + 24 + width / 2;
+          y = p.y - k * 30;
+        }
+        wanted.set(prefix + 'branch:' + name, { type: 'branch', name, current, remoteRef, x, y });
+      };
+      branches.forEach((b) => pill(b.name, b.oid, !!head && b.name === head, false));
+      tracking.forEach((t) => pill(t.name, t.oid, false, true));
 
-      // Panel: height follows the number of lanes; lane lines and names.
-      const usedLanes = commits.map((c) => (this.laneOf.has(c.oid) ? this.laneOf.get(c.oid) : 0));
-      const lanes = usedLanes.length ? Math.max(...usedLanes) + 1 : 1;
-      const panelH = 112 + lanes * LANE_H - 38;
-      this.panelRect.setAttribute('height', panelH);
-      this.svg.setAttribute('viewBox', '0 0 ' + W + ' ' + (GRAPH_Y + panelH + 14));
-      this.hint.style.display = commits.length ? 'none' : '';
-      this.panel.classList.toggle('visible', state.initialized);
-      while (this.laneEls.length < lanes) {
-        const g = el('g', {}, this.laneLayer);
-        el('line', { x1: 28, x2: 692, class: 'lane-line' }, g);
-        g._label = el('text', { x: 30, y: 0, class: 'lane-label' }, g);
-        this.laneEls.push(g);
+      const used = commits.map(laneUsed);
+      return { pos, lanes: used.length ? Math.max(...used) + 1 : 1, lay };
+    }
+
+    // Lane lines and names inside a panel.
+    drawLanes(holder, lay, lanes, geom, labelX) {
+      while (holder.laneEls.length < lanes) {
+        const g = el('g', {}, holder.lanes);
+        el('line', { class: 'lane-line' }, g);
+        g._label = el('text', { x: labelX, y: 0, class: 'lane-label' }, g);
+        if (geom.labelAnchor) g._label.setAttribute('text-anchor', geom.labelAnchor);
+        holder.laneEls.push(g);
       }
-      this.laneEls.forEach((g, i) => {
+      holder.laneEls.forEach((g, i) => {
         g.style.display = i < lanes ? '' : 'none';
-        const y = laneY(i);
+        const y = geom.y0 + i * geom.laneH;
         const line = g.firstChild;
+        line.setAttribute('x1', geom.lineX1);
+        line.setAttribute('x2', geom.lineX2);
         line.setAttribute('y1', y);
         line.setAttribute('y2', y);
-        g._label.setAttribute('y', y - 18);
-        g._label.textContent = this.laneName[i] + ' line';
+        g._label.setAttribute('y', y + (geom.labelDy === undefined ? -18 : geom.labelDy));
+        g._label.textContent = (lay.laneName[i] || '') + ' line';
       });
+    }
+
+    // The History panel under the three areas (lessons 7-9).
+    layoutGraph(state, wanted) {
+      const geom = {
+        x0: LANE_X0, xMax: 540, y0: GRAPH_Y + 112, laneH: LANE_H, maxSpacing: 92, pills: 'right',
+        lineX1: 28, lineX2: 692,
+        from: () => ({ x: ZONE_X[1] + ZONE_W / 2, y: ZONE_Y + ZONE_H })
+      };
+      const r = this.layoutSide(this.lanes.local, state.allCommits || [], state.branches || [], state.head, [], geom, wanted, '');
+      const panelH = 112 + r.lanes * LANE_H - 38;
+      this.panelRect.setAttribute('height', panelH);
+      this.svg.setAttribute('viewBox', '0 0 ' + W + ' ' + (GRAPH_Y + panelH + 14));
+      this.hint.style.display = (state.allCommits || []).length ? 'none' : '';
+      this.panel.classList.toggle('visible', state.initialized);
+      this.drawLanes({ lanes: this.laneLayer, laneEls: this.laneEls }, this.lanes.local, r.lanes, geom, 30);
+    }
+
+    // Your computer and GitHub side by side (lessons 10-11).
+    layoutRemote(state, wanted) {
+      const mk = (i) => ({
+        x0: R_X[i] + 52, xMax: R_X[i] + R_W - 44, y0: R_Y + R_LANE0, laneH: R_LANE_H, maxSpacing: 66, pills: 'above',
+        pillMinX: R_X[i] + 12, pillMaxX: R_X[i] + R_W - 12, lineX1: R_X[i] + 18, lineX2: R_X[i] + R_W - 18,
+        labelAnchor: 'end', labelDy: 28
+      });
+      const gL = mk(0);
+      const gR = mk(1);
+      const wl = new Map();
+      const wr = new Map();
+      const remote = state.remote || { branches: [], allCommits: [] };
+      const L = this.layoutSide(this.lanes.local, state.allCommits || [], state.branches || [], state.head, state.tracking || [], gL, wl, 'L:');
+      const R = this.layoutSide(this.lanes.remote, remote.allCommits, remote.branches, null, [], gR, wr, 'R:');
+      // A commit that exists on the other side glides in from there (that is a push, pull or clone).
+      wl.forEach((w, key) => {
+        if (w.type !== 'commit') return;
+        const o = R.pos.get(w.commit.oid);
+        if (o) w.from = { x: o.x, y: o.y };
+      });
+      wr.forEach((w, key) => {
+        if (w.type !== 'commit') return;
+        const o = L.pos.get(w.commit.oid);
+        if (o) w.from = { x: o.x, y: o.y };
+      });
+      wl.forEach((w, k) => wanted.set(k, w));
+      wr.forEach((w, k) => wanted.set(k, w));
+
+      const lanes = Math.max(L.lanes, R.lanes);
+      const panelH = R_LANE0 + (lanes - 1) * R_LANE_H + 66;
+      this.rPanels.forEach((p, i) => {
+        p.rect.setAttribute('height', panelH);
+        this.drawLanes(p, i ? this.lanes.remote : this.lanes.local, i ? R.lanes : L.lanes, i ? gR : gL, R_X[i] + R_W - 18);
+      });
+      this.rPanels[0].hint.textContent = state.initialized ? ((state.allCommits || []).length ? '' : 'Commits appear here') : 'No repository yet';
+      this.rPanels[1].hint.textContent = remote.allCommits.length ? '' : 'Nothing on GitHub yet';
+
+      // Arrows under the panels.
+      const y = R_Y + panelH;
+      const left = R_X[0] + R_W / 2;
+      const right = R_X[1] + R_W / 2;
+      const set = (a, from, to, yy) => {
+        a.path.setAttribute('d', 'M' + from + ' ' + (y + 4) + ' V' + (y + yy) + ' H' + to + ' V' + (y + 10));
+        a.text.setAttribute('x', (from + to) / 2);
+        a.text.setAttribute('y', y + yy + 22);
+      };
+      set(this.rArrows[0], left, right, 28);
+      set(this.rArrows[1], right, left, 66);
+      this.svg.setAttribute('viewBox', '0 0 ' + W + ' ' + (y + 66 + 34));
     }
 
     create(w) {
@@ -361,25 +529,33 @@
     }
 
     update(g, w) {
+      const shown = g.classList.contains('shown') ? ' shown' : '';
       if (w.type === 'branch') {
-        const label = w.current ? 'HEAD \u2192 ' + w.name : w.name;
+        const label = w.current ? 'HEAD → ' + w.name : w.name;
         const width = Math.round(label.length * 8.8 + 24);
         g._text.textContent = label;
         g._rect.setAttribute('x', -width / 2);
         g._rect.setAttribute('width', width);
-        g.setAttribute('class', 'item item-branch' + (w.current ? ' current' : '') + (g.classList.contains('shown') ? ' shown' : ''));
+        g.setAttribute('class', 'item item-branch' + (w.current ? ' current' : '') + (w.remoteRef ? ' remote-ref' : '') + shown);
       } else if (w.type === 'chip') {
-        g.setAttribute('class', 'item item-chip chip-' + w.chip.cls + (g.classList.contains('shown') ? ' shown' : ''));
+        g.setAttribute('class', 'item item-chip chip-' + w.chip.cls + shown);
         g._name.textContent = shorten(w.chip.key.replace(/~$/, ''));
         g._badge.textContent = w.chip.label;
       } else if (w.type === 'commit') {
         g._hash.textContent = w.commit.short;
         g._hash.style.display = w.latest ? '' : 'none'; // older hashes would overlap
-        g.setAttribute('class', 'item item-commit lane-' + ((w.lane || 0) % 3) + (g.classList.contains('shown') ? ' shown' : ''));
+        g.setAttribute('class', 'item item-commit lane-' + ((w.lane || 0) % 3) + shown);
       }
     }
 
     describe(state) {
+      if (this.remoteMode) {
+        const side = (branches) => (branches.length ? branches.map((b) => b.name + ' at ' + b.oid.slice(0, 7)).join(', ') : 'nothing yet');
+        const remote = state.remote || { branches: [] };
+        return 'Your computer: ' + side(state.branches || []) +
+          (state.tracking && state.tracking.length ? '; remote-tracking labels ' + state.tracking.map((t) => t.name + ' at ' + t.oid.slice(0, 7)).join(', ') : '') +
+          '. GitHub: ' + side(remote.branches) + '.';
+      }
       const names = (zone) => {
         const list = [];
         state.files.forEach((f) => chipsFor(f).forEach((c) => {
@@ -397,10 +573,6 @@
         (state.initialized ? plural(count, 'commit') + (names(2) === 'empty' ? '' : ', files ' + names(2)) : 'not created yet') + '.'
       );
     }
-  }
-
-  function plural(n, w) {
-    return n + ' ' + w + (n === 1 ? '' : 's');
   }
 
   window.GitDiagram = Diagram;

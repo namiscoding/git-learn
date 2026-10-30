@@ -305,3 +305,27 @@ a.lesson-card .lesson-tag { background: var(--primary); color: var(--on-primary)
 .undo-ladder code { justify-self: start; }
 .undo-ladder small { color: var(--muted); font-size: .92rem; }
 .undo-ladder li:nth-child(4) { border-color: var(--repo-line); background: var(--repo-bg); }
+
+/* ---------- remote look: your computer and GitHub side by side ---------- */
+.remote-panel rect { fill: #fff; stroke: var(--border); stroke-width: 3; }
+.remote-panel-github rect { fill: var(--repo-bg); stroke: var(--repo-line); }
+.remote-panel-local rect { fill: var(--working-bg); stroke: var(--working-line); }
+.remote-mode .commit-hash { font-size: 12px; }
+.item-branch.remote-ref rect { fill: #475569; }
+
+/* ---------- lesson 10 and 11 visuals ---------- */
+.cmd-table { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.cmd-table li { display: grid; gap: 4px; background: #fff; border: 3px solid var(--border); border-radius: 14px; padding: 12px 16px; }
+.cmd-table code { justify-self: start; font-size: 1.05rem; font-weight: 700; }
+
+.pr-mock { background: #fff; border: 3px solid var(--fg); border-radius: 16px; padding: 16px; display: grid; gap: 12px; font-size: .98rem; }
+.pr-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 1.15rem; }
+.pr-badge { background: var(--repo-line); color: #fff; font: 700 .8rem var(--font-body); padding: .2rem .7rem; border-radius: 999px; }
+.pr-num { color: var(--muted); }
+.pr-meta { margin: 0; color: var(--muted); }
+.pr-diff { border: 2px solid var(--border); border-radius: 10px; overflow: hidden; font-family: var(--font-mono); font-size: .9rem; }
+.pr-file { background: #f1f5f9; padding: 6px 12px; font-weight: 700; }
+.pr-line.add { background: var(--saved-bg); padding: 6px 12px; }
+.pr-review { font-weight: 700; }
+.pr-check { display: inline-block; background: var(--repo-line); color: #fff; border-radius: 50%; width: 1.4em; height: 1.4em; text-align: center; margin-right: .4em; }
+.pr-btn { display: inline-block; background: var(--repo-line); color: #fff; font-weight: 700; padding: .5rem 1.1rem; border-radius: 10px; }

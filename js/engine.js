@@ -9,6 +9,8 @@
 (function () {
   const DIR = '/project';
   const SHOWN_DIR = '/home/you/project';
+  const REMOTE_DIR = '/remote'; // the pretend GitHub repository
+  const TEAMMATE = { name: 'Sam', email: 'sam@example.com' };
   const AUTHOR = { name: 'You', email: 'you@example.com' };
   const enc = new TextEncoder();
   const dec = new TextDecoder();
@@ -31,6 +33,11 @@
     '  git reset [--soft|--hard] <commit>   move the branch back',
     '  git revert HEAD             undo a commit by adding a new one',
     '  git rm [--cached] <file>    stop tracking a file',
+    '  git remote add|-v           connect to (or list) a remote repository',
+    '  git clone <url>             copy a remote repository here',
+    '  git push [-u] origin <b>    send your commits to the remote',
+    '  git fetch                   download new commits without merging',
+    '  git pull                    fetch, then merge into your branch',
     '',
     'Helper commands: touch, echo, cat, ls, rm, clear'
   ].join('\n');
@@ -220,7 +227,13 @@
       this.fs = new LightningFS(this.dbName);
       this.pfs = this.fs.promises;
       await this.pfs.mkdir(DIR);
+      await this.pfs.mkdir(REMOTE_DIR);
+      await git.init({ fs: this.fs, dir: REMOTE_DIR, defaultBranch: 'main' });
       this.initialized = false;
+    }
+
+    get remoteArgs() {
+      return { fs: this.fs, dir: REMOTE_DIR };
     }
 
     // Delete every earlier lesson database (ours all start with "gitcourse").
@@ -262,6 +275,7 @@
       const names = (await this.pfs.readdir(DIR)).filter((n) => n !== '.git');
       if (!this.initialized) {
         state.files = names.sort().map((name) => ({ name, staged: null, work: null, untracked: true, h: 0, w: 2, s: 0 }));
+        state.remote = await this.remoteSnapshot(null);
         return state;
       }
       const matrix = await git.statusMatrix(this.gitArgs);
@@ -289,8 +303,61 @@
           if (!seen.has(e.oid)) seen.set(e.oid, entry(e));
         }
       }
-      state.allCommits = Array.from(seen.values());
+
+      // Remote-tracking branches (origin/main) and the pretend GitHub repository.
+      const remotes = await git.listRemotes(this.gitArgs);
+      state.remoteUrl = remotes.length ? remotes[0].url : null;
+      state.tracking = [];
+      if (remotes.length) {
+        for (const n of (await git.listBranches({ ...this.gitArgs, remote: remotes[0].remote })).sort()) {
+          if (n === 'HEAD') continue;
+          const oid = await git.resolveRef({ ...this.gitArgs, ref: 'refs/remotes/' + remotes[0].remote + '/' + n });
+          state.tracking.push({ name: remotes[0].remote + '/' + n, oid });
+          for (const e of await git.log({ ...this.gitArgs, ref: oid })) {
+            if (!seen.has(e.oid)) seen.set(e.oid, entry(e));
+          }
+        }
+        state.allCommits = Array.from(seen.values());
+      }
+      state.remote = await this.remoteSnapshot(state.remoteUrl);
+      state.upstream = null;
+      const upRemote = await git.getConfig({ ...this.gitArgs, path: 'branch.' + state.head + '.remote' });
+      const upMerge = await git.getConfig({ ...this.gitArgs, path: 'branch.' + state.head + '.merge' });
+      if (upRemote && upMerge) {
+        const ref = upRemote + '/' + String(upMerge).replace('refs/heads/', '');
+        const tr = state.tracking.find((t) => t.name === ref);
+        if (tr && state.commits[0]) {
+          const mine = new Set(state.commits.map((c) => c.oid));
+          const theirs = new Set((await git.log({ ...this.gitArgs, ref: tr.oid })).map((e) => e.oid));
+          state.upstream = {
+            ref,
+            ahead: state.commits.filter((c) => !theirs.has(c.oid)).length,
+            behind: Array.from(theirs).filter((o) => !mine.has(o)).length
+          };
+        }
+      }
       return state;
+    }
+
+    // Branches and commits of the pretend GitHub repository, or null if nothing is there yet.
+    async remoteSnapshot(url) {
+      const names = (await git.listBranches(this.remoteArgs)).sort();
+      if (!names.length && !url) return null;
+      const seen = new Map();
+      const branches = [];
+      for (const name of names) {
+        const tip = await git.resolveRef({ ...this.remoteArgs, ref: 'refs/heads/' + name });
+        branches.push({ name, oid: tip });
+        for (const e of await git.log({ ...this.remoteArgs, ref: name })) {
+          if (!seen.has(e.oid)) {
+            seen.set(e.oid, {
+              oid: e.oid, short: e.oid.slice(0, 7), message: e.commit.message.trim(),
+              author: e.commit.author, parents: e.commit.parent
+            });
+          }
+        }
+      }
+      return { url, branches, allCommits: Array.from(seen.values()) };
     }
 
     // Run one command line, the way a terminal would. Returns { ok, kind, out }.
@@ -388,7 +455,8 @@
       const sub = args[0];
       if (!sub) return ok('git', 'usage: git <command>. Type help to see the commands used in this course.');
       if (sub === 'init') return this.gitInit();
-      const supported = ['status', 'add', 'commit', 'log', 'diff', 'branch', 'switch', 'checkout', 'merge', 'restore', 'reset', 'revert', 'rm'];
+      if (sub === 'clone') return this.gitClone(args.slice(1));
+      const supported = ['status', 'add', 'commit', 'log', 'diff', 'branch', 'switch', 'checkout', 'merge', 'restore', 'reset', 'revert', 'rm', 'remote', 'push', 'pull', 'fetch', 'clone'];
       if (supported.indexOf(sub) === -1) {
         return fail('git', "git: '" + sub + "' is not part of this course yet. Type help to see what works.");
       }
@@ -406,6 +474,10 @@
       if (sub === 'reset') return this.gitReset(args.slice(1));
       if (sub === 'revert') return this.gitRevert(args.slice(1));
       if (sub === 'rm') return this.gitRm(args.slice(1));
+      if (sub === 'remote') return this.gitRemote(args.slice(1));
+      if (sub === 'push') return this.gitPush(args.slice(1));
+      if (sub === 'pull') return this.gitPull(args.slice(1));
+      if (sub === 'fetch') return this.gitFetch(args.slice(1));
       return this.gitLog(args.slice(1));
     }
 
@@ -426,6 +498,14 @@
 
     statusText(state) {
       const lines = ['On branch ' + state.head];
+      const up = state.upstream;
+      if (up) {
+        const n = (k) => k + ' commit' + (k === 1 ? '' : 's');
+        if (!up.ahead && !up.behind) lines.push("Your branch is up to date with '" + up.ref + "'.");
+        else if (up.ahead && !up.behind) lines.push("Your branch is ahead of '" + up.ref + "' by " + n(up.ahead) + '.', '  (use "git push" to publish your local commits)');
+        else if (!up.ahead && up.behind) lines.push("Your branch is behind '" + up.ref + "' by " + n(up.behind) + ', and can be fast-forwarded.', '  (use "git pull" to update your local branch)');
+        else lines.push("Your branch and '" + up.ref + "' have diverged,", 'and have ' + up.ahead + ' and ' + up.behind + ' different commits each, respectively.', '  (use "git pull" if you want to integrate the remote branch with yours)');
+      }
       const noCommits = state.commits.length === 0;
       if (noCommits) lines.push('', 'No commits yet');
 
@@ -670,8 +750,9 @@
       const decorate = (oid) => {
         const names = state.branches.filter((b) => b.oid === oid).map((b) => b.name);
         names.sort((a, b) => (a === state.head ? -1 : b === state.head ? 1 : a < b ? -1 : 1));
-        if (!names.length) return '';
-        return ' (' + names.map((n) => (n === state.head ? 'HEAD -> ' + n : n)).join(', ') + ')';
+        const remoteNames = (state.tracking || []).filter((t) => t.oid === oid).map((t) => t.name);
+        const all = names.map((n) => (n === state.head ? 'HEAD -> ' + n : n)).concat(remoteNames);
+        return all.length ? ' (' + all.join(', ') + ')' : '';
       };
       const out = state.commits.map((c) => {
         const deco = decorate(c.oid);
@@ -808,6 +889,11 @@
         }
         return ok('branch', out.join('\n'));
       }
+      if (flags.includes('-r') || flags.includes('-a')) {
+        const remoteLines = (state.tracking || []).map((t) => '  ' + (flags.includes('-a') ? 'remotes/' : '') + t.name);
+        const localLines = flags.includes('-a') ? state.branches.map((b) => (b.name === state.head ? '* ' : '  ') + b.name) : [];
+        return ok('branch', localLines.concat(remoteLines).join('\n'));
+      }
       const unknown = flags.filter((f) => f !== '-d' && f !== '-D');
       if (unknown.length) return fail('branch', "error: this course does not support the option '" + unknown[0] + "' yet");
 
@@ -877,14 +963,19 @@
       if (!names.length) return fail('merge', 'fatal: specify a branch to merge');
       const target = names[0];
       const state = await this.getState();
-      const theirs = state.branches.find((b) => b.name === target);
+      const theirs = state.branches.find((b) => b.name === target) || (state.tracking || []).find((t) => t.name === target);
       if (!theirs) return fail('merge', 'merge: ' + target + ' - not something we can merge');
+      return this.performMerge(state, theirs.oid, "Merge branch '" + target + "'");
+    }
+
+    // Bring the commit `theirsOid` into the current branch (used by merge and pull).
+    async performMerge(state, theirsOid, message) {
       const oursOid = state.commits[0] && state.commits[0].oid;
       if (!oursOid) return fail('merge', 'fatal: there is nothing to merge into yet');
-      if (await this.isAncestor(theirs.oid, oursOid)) return ok('merge', 'Already up to date.');
+      if (await this.isAncestor(theirsOid, oursOid)) return ok('merge', 'Already up to date.');
 
       const before = await this.snapshot(oursOid);
-      const after = await this.snapshot(theirs.oid);
+      const after = await this.snapshot(theirsOid);
       const touched = Array.from(new Set([...before.keys(), ...after.keys()])).filter((p) => before.get(p) !== after.get(p));
       const dirty = (await this.dirtyFiles()).filter((f) => touched.includes(f));
       if (dirty.length) {
@@ -894,11 +985,11 @@
           'Please commit your changes or stash them before you merge.\nAborting');
       }
 
-      const fastForward = await this.isAncestor(oursOid, theirs.oid);
+      const fastForward = await this.isAncestor(oursOid, theirsOid);
       try {
         await git.merge({
-          ...this.gitArgs, ours: state.head, theirs: target,
-          author: AUTHOR, message: "Merge branch '" + target + "'", fastForwardOnly: false
+          ...this.gitArgs, ours: state.head, theirs: theirsOid,
+          author: AUTHOR, message, fastForwardOnly: false
         });
       } catch (e) {
         const files = (e && e.data && e.data.filepaths) || [];
@@ -1061,6 +1152,280 @@
         out.push("rm '" + p + "'");
       }
       return ok('rm', out.join('\n'));
+    }
+
+    /* ----- remotes: a second repository standing in for GitHub ----- */
+
+    // Copy a commit and everything it needs from one repository to another. Returns objects copied.
+    async copyObjects(src, dst, oid) {
+      const seen = new Set();
+      let count = 0;
+      const copy = async (id) => {
+        if (seen.has(id)) return;
+        seen.add(id);
+        try {
+          await git.readObject({ ...dst, oid: id, format: 'content' });
+          return; // already there
+        } catch (e) { /* not there yet */ }
+        const { type, object } = await git.readObject({ ...src, oid: id, format: 'content' });
+        if (type === 'commit') {
+          const { commit } = await git.readCommit({ ...src, oid: id });
+          for (const p of commit.parent) await copy(p);
+          await copy(commit.tree);
+        } else if (type === 'tree') {
+          const { tree } = await git.readTree({ ...src, oid: id });
+          for (const entry of tree) await copy(entry.oid);
+        }
+        await git.writeObject({ ...dst, type, object, format: 'content' });
+        count++;
+      };
+      await copy(oid);
+      return count;
+    }
+
+    async hasObject(args, oid) {
+      try {
+        await git.readObject({ ...args, oid, format: 'content' });
+        return true;
+      } catch (e) {
+        return false;
+      }
+    }
+
+    async primaryRemote() {
+      const remotes = await git.listRemotes(this.gitArgs);
+      return remotes[0] || null;
+    }
+
+    async gitRemote(args) {
+      const remotes = await git.listRemotes(this.gitArgs);
+      if (!args.length) return ok('remote', remotes.map((r) => r.remote).join('\n'));
+      if (args[0] === '-v' || args[0] === '--verbose') {
+        const lines = [];
+        remotes.forEach((r) => {
+          lines.push(r.remote + '\t' + r.url + ' (fetch)');
+          lines.push(r.remote + '\t' + r.url + ' (push)');
+        });
+        return ok('remote', lines.join('\n'));
+      }
+      if (args[0] === 'add') {
+        if (args.length < 3) return fail('remote', 'usage: git remote add <name> <url>');
+        if (remotes.some((r) => r.remote === args[1])) return fail('remote', 'error: remote ' + args[1] + ' already exists.');
+        await git.addRemote({ ...this.gitArgs, remote: args[1], url: args[2] });
+        return ok('remote');
+      }
+      return fail('remote', "error: this course does not support 'git remote " + args[0] + "' yet");
+    }
+
+    async gitClone(args) {
+      const url = args.filter((a) => a[0] !== '-')[0];
+      if (!url) return fail('clone', 'fatal: You must specify a repository to clone.');
+      const names = await this.pfs.readdir(DIR);
+      if (this.initialized || names.length) {
+        return fail('clone', "fatal: destination path 'project' already exists and is not an empty directory.");
+      }
+      const rBranches = (await git.listBranches(this.remoteArgs)).sort();
+      await git.init({ ...this.gitArgs, defaultBranch: 'main' });
+      this.initialized = true;
+      await git.addRemote({ ...this.gitArgs, remote: 'origin', url });
+      if (!rBranches.length) return ok('clone', "Cloning into 'project'...\nwarning: You appear to have cloned an empty repository.");
+
+      let count = 0;
+      for (const b of rBranches) {
+        const oid = await git.resolveRef({ ...this.remoteArgs, ref: 'refs/heads/' + b });
+        count += await this.copyObjects(this.remoteArgs, this.gitArgs, oid);
+        await git.writeRef({ ...this.gitArgs, ref: 'refs/remotes/origin/' + b, value: oid, force: true });
+      }
+      const main = rBranches.includes('main') ? 'main' : rBranches[0];
+      const tip = await git.resolveRef({ ...this.remoteArgs, ref: 'refs/heads/' + main });
+      await git.writeRef({ ...this.gitArgs, ref: 'refs/heads/' + main, value: tip, force: true });
+      await git.writeRef({ ...this.gitArgs, ref: 'HEAD', value: 'refs/heads/' + main, symbolic: true, force: true });
+      await git.checkout({ ...this.gitArgs, ref: main, force: true });
+      await git.setConfig({ ...this.gitArgs, path: 'branch.' + main + '.remote', value: 'origin' });
+      await git.setConfig({ ...this.gitArgs, path: 'branch.' + main + '.merge', value: 'refs/heads/' + main });
+      return ok('clone', [
+        "Cloning into 'project'...",
+        'remote: Enumerating objects: ' + count + ', done.',
+        'remote: Total ' + count + ' (delta 0), reused 0 (delta 0), pack-reused 0',
+        'Receiving objects: 100% (' + count + '/' + count + '), done.'
+      ].join('\n'));
+    }
+
+    async gitPush(args) {
+      const flags = args.filter((a) => a[0] === '-');
+      const rest = args.filter((a) => a[0] !== '-');
+      const setUp = flags.includes('-u') || flags.includes('--set-upstream');
+      const bad = flags.filter((f) => f !== '-u' && f !== '--set-upstream');
+      if (bad.length) return fail('push', "error: this course does not support the option '" + bad[0] + "' yet");
+      const remote = await this.primaryRemote();
+      if (!remote) {
+        return fail('push',
+          'fatal: No configured push destination.\n' +
+          'Either specify the URL from the command-line or configure a remote repository using\n\n' +
+          '    git remote add <name> <url>\n\nand then push using the remote name\n\n    git push <name>');
+      }
+      if (rest[0] && rest[0] !== remote.remote) {
+        return fail('push', "fatal: '" + rest[0] + "' does not appear to be a git repository\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.");
+      }
+      const state = await this.getState();
+      const branch = rest[1] && rest[1] !== 'HEAD' ? rest[1] : state.head;
+      const hasUpstream = !!(await git.getConfig({ ...this.gitArgs, path: 'branch.' + state.head + '.remote' }));
+      if (!rest.length && !setUp && !hasUpstream) {
+        return fail('push',
+          'fatal: The current branch ' + state.head + ' has no upstream branch.\n' +
+          'To push the current branch and set the remote as upstream, use\n\n' +
+          '    git push --set-upstream ' + remote.remote + ' ' + state.head);
+      }
+      let localTip;
+      try {
+        localTip = await git.resolveRef({ ...this.gitArgs, ref: 'refs/heads/' + branch });
+      } catch (e) {
+        return fail('push', 'error: src refspec ' + branch + " does not match any\nerror: failed to push some refs to '" + remote.url + "'");
+      }
+      let remoteTip = null;
+      try {
+        remoteTip = await git.resolveRef({ ...this.remoteArgs, ref: 'refs/heads/' + branch });
+      } catch (e) { /* new branch on the remote */ }
+
+      const trackLine = setUp ? "\nbranch '" + branch + "' set up to track '" + remote.remote + '/' + branch + "'." : '';
+      const setTracking = async () => {
+        if (!setUp) return;
+        await git.setConfig({ ...this.gitArgs, path: 'branch.' + branch + '.remote', value: remote.remote });
+        await git.setConfig({ ...this.gitArgs, path: 'branch.' + branch + '.merge', value: 'refs/heads/' + branch });
+      };
+      if (remoteTip === localTip) {
+        await setTracking();
+        await git.writeRef({ ...this.gitArgs, ref: 'refs/remotes/' + remote.remote + '/' + branch, value: localTip, force: true });
+        return ok('push', 'Everything up-to-date' + trackLine);
+      }
+      if (remoteTip) {
+        const known = await this.hasObject(this.gitArgs, remoteTip);
+        const ahead = known && (await this.isAncestor(remoteTip, localTip));
+        if (!ahead) {
+          const why = known ? 'non-fast-forward' : 'fetch first';
+          const hint = known
+            ? "hint: Updates were rejected because the tip of your current branch is behind\nhint: its remote counterpart. If you want to integrate the remote changes,\nhint: use 'git pull' before pushing again.\nhint: See the 'Note about fast-forwards' in 'git push --help' for details."
+            : "hint: Updates were rejected because the remote contains work that you do not\nhint: have locally. This is usually caused by another repository pushing to\nhint: the same ref. If you want to integrate the remote changes, use\nhint: 'git pull' before pushing again.\nhint: See the 'Note about fast-forwards' in 'git push --help' for details.";
+          return fail('push',
+            'To ' + remote.url + '\n ! [rejected]        ' + branch + ' -> ' + branch + ' (' + why + ')\n' +
+            "error: failed to push some refs to '" + remote.url + "'\n" + hint);
+        }
+      }
+      const count = await this.copyObjects(this.gitArgs, this.remoteArgs, localTip);
+      await git.writeRef({ ...this.remoteArgs, ref: 'refs/heads/' + branch, value: localTip, force: true });
+      await git.writeRef({ ...this.gitArgs, ref: 'refs/remotes/' + remote.remote + '/' + branch, value: localTip, force: true });
+      await setTracking();
+      const change = remoteTip
+        ? '   ' + remoteTip.slice(0, 7) + '..' + localTip.slice(0, 7) + '  ' + branch + ' -> ' + branch
+        : ' * [new branch]      ' + branch + ' -> ' + branch;
+      return ok('push', [
+        'Enumerating objects: ' + count + ', done.',
+        'Writing objects: 100% (' + count + '/' + count + '), done.',
+        'To ' + remote.url,
+        change
+      ].join('\n') + trackLine);
+    }
+
+    // Download new commits and move the origin/* labels. Returns the lines Git prints.
+    async fetchFromRemote(remote) {
+      const lines = [];
+      const branches = (await git.listBranches(this.remoteArgs)).sort();
+      const width = Math.max(0, ...branches.map((b) => b.length));
+      for (const b of branches) {
+        const oid = await git.resolveRef({ ...this.remoteArgs, ref: 'refs/heads/' + b });
+        let old = null;
+        try {
+          old = await git.resolveRef({ ...this.gitArgs, ref: 'refs/remotes/' + remote.remote + '/' + b });
+        } catch (e) { /* first fetch of this branch */ }
+        if (old === oid) continue;
+        await this.copyObjects(this.remoteArgs, this.gitArgs, oid);
+        await git.writeRef({ ...this.gitArgs, ref: 'refs/remotes/' + remote.remote + '/' + b, value: oid, force: true });
+        lines.push(old
+          ? '   ' + old.slice(0, 7) + '..' + oid.slice(0, 7) + '  ' + b.padEnd(width) + ' -> ' + remote.remote + '/' + b
+          : ' * [new branch]      ' + b.padEnd(width) + ' -> ' + remote.remote + '/' + b);
+      }
+      return lines.length ? ['From ' + remote.url.replace(/\.git$/, '')].concat(lines) : [];
+    }
+
+    async gitFetch(args) {
+      const bad = args.filter((a) => a[0] === '-');
+      if (bad.length) return fail('fetch', "error: this course does not support the option '" + bad[0] + "' yet");
+      const remote = await this.primaryRemote();
+      if (!remote) return fail('fetch', "fatal: No remote repository specified.  Please, specify either a URL or a\nremote name from which new revisions should be fetched.");
+      return ok('fetch', (await this.fetchFromRemote(remote)).join('\n'));
+    }
+
+    async gitPull(args) {
+      const bad = args.filter((a) => a[0] === '-');
+      if (bad.length) return fail('pull', "error: this course does not support the option '" + bad[0] + "' yet");
+      const remote = await this.primaryRemote();
+      if (!remote) return fail('pull', 'fatal: No remote repository specified.\nPlease specify which remote you want to pull from.');
+      const first = await this.getState();
+      let branch = args[1];
+      if (!branch) {
+        const merge = await git.getConfig({ ...this.gitArgs, path: 'branch.' + first.head + '.merge' });
+        if (!merge) {
+          return fail('pull',
+            'There is no tracking information for the current branch.\n' +
+            'Please specify which branch you want to merge with.\nSee git-pull(1) for details.\n\n' +
+            '    git pull <remote> <branch>\n\n' +
+            'If you wish to set tracking information for this branch you can do so with:\n\n' +
+            '    git branch --set-upstream-to=' + remote.remote + '/<branch> ' + first.head);
+        }
+        branch = String(merge).replace('refs/heads/', '');
+      }
+      const fetched = await this.fetchFromRemote(remote);
+      let theirs;
+      try {
+        theirs = await git.resolveRef({ ...this.gitArgs, ref: 'refs/remotes/' + remote.remote + '/' + branch });
+      } catch (e) {
+        return fail('pull', "fatal: couldn't find remote ref " + branch);
+      }
+      const state = await this.getState();
+      if (!state.commits.length) {
+        return fail('pull', 'This course needs at least one local commit before pull.');
+      }
+      const merged = await this.performMerge(state, theirs, "Merge branch '" + branch + "' of " + remote.url.replace(/\.git$/, ''));
+      return { ok: merged.ok, kind: 'pull', out: fetched.concat(merged.out ? [merged.out] : []).join('\n') };
+    }
+
+    /* ----- helpers for lessons: things that happen "on GitHub" or "by a teammate" ----- */
+
+    // Make the pretend remote look like someone else committed there.
+    async remoteCommit({ file, text, message, branch, append, author }) {
+      const dir = REMOTE_DIR;
+      const target = branch || 'main';
+      const branches = await git.listBranches(this.remoteArgs);
+      if (branches.includes(target)) {
+        await git.checkout({ ...this.remoteArgs, ref: target, force: true });
+      } else if (branches.length) {
+        await git.branch({ ...this.remoteArgs, ref: target, checkout: true });
+        await git.checkout({ ...this.remoteArgs, ref: target, force: true });
+      }
+      const path = dir + '/' + file;
+      let old = '';
+      try { old = dec.decode(await this.pfs.readFile(path)); } catch (e) { /* new file */ }
+      await this.pfs.writeFile(path, (append ? old : '') + text + '\n');
+      await git.add({ ...this.remoteArgs, filepath: file });
+      return git.commit({ ...this.remoteArgs, message, author: author || TEAMMATE });
+    }
+
+    // Seed the pretend GitHub repository before a lesson starts.
+    async seedRemote(url, commits) {
+      for (const c of commits) await this.remoteCommit(c);
+      this.remoteSeedUrl = url;
+    }
+
+    // "Merge pull request" on the pretend GitHub: always makes a merge commit, like the green button.
+    async remoteMerge(head, base) {
+      const author = { name: 'GitHub', email: 'noreply@github.com' };
+      await git.checkout({ ...this.remoteArgs, ref: base, force: true });
+      await git.merge({
+        ...this.remoteArgs, ours: base, theirs: head, author, fastForward: false,
+        message: 'Merge pull request #1 from you/' + head
+      });
+      await git.checkout({ ...this.remoteArgs, ref: base, force: true });
+      return git.resolveRef({ ...this.remoteArgs, ref: 'refs/heads/' + base });
     }
   }
 
