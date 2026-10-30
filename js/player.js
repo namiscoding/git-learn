@@ -42,7 +42,9 @@
   function loadScript(src) {
     return new Promise((resolve, reject) => {
       const s = document.createElement('script');
-      s.src = src;
+      // Same version as the page's own files, so a new deploy never mixes old and new code.
+      const v = window.COURSE_VERSION;
+      s.src = src + '?v=' + (v && v.indexOf('__') !== 0 ? v : Date.now());
       s.onload = resolve;
       s.onerror = () => reject(new Error('Could not load ' + src));
       document.head.appendChild(s);

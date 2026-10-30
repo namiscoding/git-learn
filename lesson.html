@@ -7,18 +7,19 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@600;700&family=Nunito:wght@400;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="css/style.css">
+  <link rel="stylesheet" href="css/style.css?v=__VERSION__">
 </head>
 <body class="lesson-page">
+  <script>window.COURSE_VERSION = "__VERSION__"; // replaced by the deploy workflow</script>
   <div id="app" class="app"><p class="loading">Loading lesson…</p></div>
   <noscript><p class="message">This course needs JavaScript to run the practice terminal.</p></noscript>
 
-  <script src="js/vendor/isomorphic-git.umd.min.js"></script>
-  <script src="js/vendor/lightning-fs.min.js"></script>
-  <script src="js/lessons-list.js"></script>
-  <script src="js/engine.js"></script>
-  <script src="js/diagram.js"></script>
-  <script src="js/terminal.js"></script>
-  <script src="js/player.js"></script>
+  <script src="js/vendor/isomorphic-git.umd.min.js?v=__VERSION__"></script>
+  <script src="js/vendor/lightning-fs.min.js?v=__VERSION__"></script>
+  <script src="js/lessons-list.js?v=__VERSION__"></script>
+  <script src="js/engine.js?v=__VERSION__"></script>
+  <script src="js/diagram.js?v=__VERSION__"></script>
+  <script src="js/terminal.js?v=__VERSION__"></script>
+  <script src="js/player.js?v=__VERSION__"></script>
 </body>
 </html>
