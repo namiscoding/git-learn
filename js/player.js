@@ -163,7 +163,7 @@
       this.diagram = null;
       this.terminal = null;
 
-      const label = { concept: 'Watch', step: 'Step through', practice: 'Your turn', recap: 'Recap' }[slide.type];
+      const label = { concept: 'Watch', story: 'The idea', step: 'Step through', practice: 'Your turn', recap: 'Recap' }[slide.type];
       const text = h('div', { class: 'slide-text' }, [
         h('p', { class: 'eyebrow', text: label }),
         h('h2', { tabindex: '-1', text: slide.title }),
@@ -178,7 +178,16 @@
         text.appendChild(list);
       }
 
-      if (slide.type !== 'recap') {
+      if (slide.type === 'story') {
+        // A hand-made picture (plain HTML in the lesson file); .reveal items fade in one by one.
+        const visual = h('div', { class: 'slide-visual story-visual', html: slide.visualHtml });
+        visual.querySelectorAll('.reveal').forEach((n, i) => {
+          n.style.animationDelay = i * 0.45 + 0.2 + 's';
+        });
+        section.appendChild(visual);
+      }
+
+      if (slide.type !== 'recap' && slide.type !== 'story') {
         const visual = h('div', { class: 'slide-visual' });
         const diagramBox = h('div', { class: 'diagram-box' });
         visual.appendChild(diagramBox);

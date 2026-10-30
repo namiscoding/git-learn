@@ -223,3 +223,34 @@ a.lesson-card .lesson-tag { background: var(--primary); color: var(--on-primary)
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 1ms !important; transition-duration: 1ms !important; }
 }
+
+/* ---------- story slides (lesson visuals made of plain HTML) ---------- */
+.story-visual { align-content: center; }
+.reveal { opacity: 0; animation: reveal 520ms ease-out forwards; }
+@keyframes reveal { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+
+.file-pile { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; justify-items: start; }
+.file-pile li {
+  font: 700 1rem var(--font-mono); background: #fff; border: 3px solid var(--fg); border-radius: 12px;
+  padding: 8px 14px; max-width: 100%; overflow-wrap: anywhere;
+}
+.file-pile li:nth-child(odd) { transform: rotate(-.6deg); }
+.file-pile li:nth-child(even) { margin-left: 18px; transform: rotate(.6deg); }
+.file-pile .pile-q { border: 0; background: transparent; font: 700 3rem var(--font-head); color: var(--accent); padding: 0 14px; }
+
+.benefit-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.benefit { background: #fff; border: 3px solid var(--border); border-radius: 16px; padding: 14px 16px; box-shadow: 0 4px 0 var(--border); }
+.benefit h3 { font-size: 1.2rem; color: var(--primary-dark); }
+.benefit p { margin: 0; font-size: .98rem; }
+
+.two-boxes { display: grid; gap: 12px; justify-items: stretch; }
+.box { border: 3px solid var(--fg); border-radius: 18px; padding: 16px 18px; }
+.box h3 { font-size: 1.5rem; margin-bottom: 0; }
+.box p { margin: .2rem 0 0; }
+.box .where { font-weight: 700; color: var(--muted); margin-bottom: .6rem; }
+.box-local { background: var(--working-bg); border-color: var(--working-line); }
+.box-remote { background: var(--repo-bg); border-color: var(--repo-line); }
+.box-link { text-align: center; font-weight: 700; color: var(--muted); }
+.box-link span::before { content: "↕ "; color: var(--accent); }
+
+@media (max-width: 480px) { .benefit-grid { grid-template-columns: 1fr; } }

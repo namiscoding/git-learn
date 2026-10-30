@@ -63,7 +63,8 @@ for (const entry of list) {
   else {
     lesson.slides.forEach((s, i) => {
       const where = rel + ' slide ' + (i + 1);
-      if (!['concept', 'step', 'practice', 'recap'].includes(s.type)) fail(where + ': unknown type "' + s.type + '"');
+      if (!['concept', 'story', 'step', 'practice', 'recap'].includes(s.type)) fail(where + ': unknown type "' + s.type + '"');
+      if (s.type === 'story' && !s.visualHtml) fail(where + ': story slide has no visualHtml');
       if ((s.type === 'concept' || s.type === 'step') && !(s.steps && s.steps.length)) fail(where + ': no steps');
       if (s.type === 'practice' && !(s.tasks && s.tasks.length)) fail(where + ': no tasks');
     });

@@ -3,7 +3,7 @@
  * lessons/<file>.js exists.
  */
 window.LESSON_LIST = [
-  { id: '01', group: 'Fundamentals', title: 'What Git is and why', blurb: 'Saved versions instead of final_v2_REAL.doc.', file: null },
+  { id: '01', group: 'Fundamentals', title: 'What Git is and why', blurb: 'Saved versions instead of final_v2_REAL.doc.', file: '01-what-is-git' },
   { id: '02', group: 'Fundamentals', title: 'The three areas', blurb: 'Working folder, staging area, repository.', file: '02-three-areas' },
   { id: '03', group: 'Fundamentals', title: 'Your first commit', blurb: 'git add and git commit, and why there are two steps.', file: '03-first-commit' },
   { id: '04', group: 'Fundamentals', title: 'Writing good commit messages', blurb: 'Messages your future self can read.', file: null },
