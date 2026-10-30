@@ -16,5 +16,6 @@ window.LESSON_LIST = [
   { id: '11', group: 'Fundamentals', title: 'Pull requests', blurb: 'Propose a change and get it reviewed.', file: '11-pull-requests' },
   { id: '12', group: 'A little advanced', title: 'Merge conflicts', blurb: 'What to do when two edits collide.', file: '12-merge-conflicts' },
   { id: '13', group: 'A little advanced', title: 'Stash', blurb: 'Set work aside and come back to it.', file: '13-stash' },
-  { id: '14', group: 'A little advanced', title: 'Rebase', blurb: 'Replay your changes on a new starting point.', file: '14-rebase' }
+  { id: '14', group: 'A little advanced', title: 'Rebase', blurb: 'Replay your changes on a new starting point.', file: '14-rebase' },
+  { id: '15', group: 'A little advanced', title: 'Reflog: your safety net', blurb: 'Recover commits you thought were lost.', file: '15-reflog' }
 ];

@@ -30,6 +30,7 @@
     '  git switch [-c] <branch>    move to a branch (-c creates it)',
     '  git merge <branch>          bring a branch into the current one',
     '  git stash [pop|list]        set unfinished work aside, and bring it back',
+    '  git reflog                  show where HEAD has been (your safety net)',
     '  git rebase <branch>         replay your commits on top of another branch',
     '  git restore [--staged] <f>  undo changes to a file',
     '  git reset [--soft|--hard] <commit>   move the branch back',
@@ -228,6 +229,12 @@
       this.rebase = null; // a rebase that stopped on a conflict
       this.unmerged = new Map(); // path -> "both modified", "deleted by us", ...
       this.stashes = []; // newest first
+      this.reflog = []; // where HEAD has been, newest first
+    }
+
+    // Add a line to the reflog: HEAD is now at `oid`.
+    logHead(oid, message) {
+      if (oid) this.reflog.unshift({ oid, message });
     }
 
     // Start over with an empty folder. Await this before running commands.
@@ -488,7 +495,7 @@
       if (!sub) return ok('git', 'usage: git <command>. Type help to see the commands used in this course.');
       if (sub === 'init') return this.gitInit();
       if (sub === 'clone') return this.gitClone(args.slice(1));
-      const supported = ['status', 'add', 'commit', 'log', 'diff', 'branch', 'switch', 'checkout', 'merge', 'restore', 'reset', 'revert', 'rm', 'remote', 'push', 'pull', 'fetch', 'clone', 'stash', 'rebase'];
+      const supported = ['status', 'add', 'commit', 'log', 'diff', 'branch', 'switch', 'checkout', 'merge', 'restore', 'reset', 'revert', 'rm', 'remote', 'push', 'pull', 'fetch', 'clone', 'stash', 'rebase', 'reflog'];
       if (supported.indexOf(sub) === -1) {
         return fail('git', "git: '" + sub + "' is not part of this course yet. Type help to see what works.");
       }
@@ -506,6 +513,7 @@
       if (sub === 'reset') return this.gitReset(args.slice(1));
       if (sub === 'revert') return this.gitRevert(args.slice(1));
       if (sub === 'rm') return this.gitRm(args.slice(1));
+      if (sub === 'reflog') return this.gitReflog(args.slice(1));
       if (sub === 'stash') return this.gitStash(args.slice(1));
       if (sub === 'rebase') return this.gitRebase(args.slice(1));
       if (sub === 'remote') return this.gitRemote(args.slice(1));
@@ -705,6 +713,7 @@
       const parent = state.commits[0] ? state.commits[0].oid : null;
       const oid = await git.commit({ ...this.gitArgs, message, author: AUTHOR });
 
+      this.logHead(oid, (parent ? 'commit: ' : 'commit (initial): ') + message.split('\n')[0]);
       const summary = await this.commitSummary(staged, parent, oid);
       const head = '[' + state.head + ' ' + (parent ? '' : '(root-commit) ') + oid.slice(0, 7) + '] ' + message.split('\n')[0];
       return ok('commit', head + '\n' + summary);
@@ -886,6 +895,8 @@
 
     // HEAD, HEAD~2, HEAD^, a branch name, or a (short) commit id -> full id, or null.
     async resolveCommit(text) {
+      const at = /^HEAD@\{(\d+)\}$/.exec(text);
+      if (at) return this.reflog[parseInt(at[1], 10)] ? this.reflog[parseInt(at[1], 10)].oid : null;
       const m = /^([^~^]+)((?:~\d*|\^)*)$/.exec(text);
       if (!m) return null;
       let oid = null;
@@ -995,7 +1006,13 @@
       if (!/^[A-Za-z0-9._\/-]+$/.test(name)) return fail('branch', "fatal: '" + name + "' is not a valid branch name");
       if (!state.commits.length) return fail('branch', "fatal: not a valid object name: '" + state.head + "'");
       if (state.branches.some((b) => b.name === name)) return fail('branch', "fatal: a branch named '" + name + "' already exists");
-      await git.branch({ ...this.gitArgs, ref: name });
+      let start = null;
+      if (names[1]) {
+        start = await this.resolveCommit(names[1]);
+        if (!start) return fail('branch', "fatal: not a valid object name: '" + names[1] + "'");
+      }
+      if (start) await git.writeRef({ ...this.gitArgs, ref: 'refs/heads/' + name, value: start });
+      else await git.branch({ ...this.gitArgs, ref: name });
       return ok('branch');
     }
 
@@ -1020,6 +1037,7 @@
         } else {
           await git.branch({ ...this.gitArgs, ref: target, checkout: true });
         }
+        this.logHead(await this.headOid(), 'checkout: moving from ' + state.head + ' to ' + target);
         return ok('switch', "Switched to a new branch '" + target + "'");
       }
       if (!exists) {
@@ -1043,6 +1061,7 @@
         }
       }
       await git.checkout({ ...this.gitArgs, ref: target });
+      this.logHead(await this.headOid(), 'checkout: moving from ' + state.head + ' to ' + target);
       return ok('switch', "Switched to branch '" + target + "'");
     }
 
@@ -1123,6 +1142,7 @@
 
       const oldSnap = await this.snapshot(state.commits[0].oid);
       await git.writeRef({ ...this.gitArgs, ref: 'refs/heads/' + state.head, value: target, force: true });
+      this.logHead(target, 'reset: moving to ' + (rest[0] || 'HEAD'));
       const newSnap = await this.snapshot(target);
       const everyPath = Array.from(new Set([...state.files.map((f) => f.name), ...oldSnap.keys(), ...newSnap.keys()]));
 
@@ -1188,6 +1208,7 @@
         ...this.gitArgs, author: AUTHOR,
         message: 'Revert "' + subject + '"\n\nThis reverts commit ' + target + '.\n'
       });
+      this.logHead(oid, 'revert: Revert "' + subject + '"');
       const stat = await this.changeSummary(before, await this.snapshot(oid));
       const summary = stat.split('\n').filter((l) => /changed|mode/.test(l)).join('\n');
       return ok('revert', '[' + state.head + ' ' + oid.slice(0, 7) + '] Revert "' + subject + '"\n' + summary);
@@ -1301,6 +1322,7 @@
       await git.writeRef({ ...this.gitArgs, ref: 'refs/heads/' + main, value: tip, force: true });
       await git.writeRef({ ...this.gitArgs, ref: 'HEAD', value: 'refs/heads/' + main, symbolic: true, force: true });
       await git.checkout({ ...this.gitArgs, ref: main, force: true });
+      this.logHead(tip, 'clone: from ' + url);
       await git.setConfig({ ...this.gitArgs, path: 'branch.' + main + '.remote', value: 'origin' });
       await git.setConfig({ ...this.gitArgs, path: 'branch.' + main + '.merge', value: 'refs/heads/' + main });
       return ok('clone', [
@@ -1455,7 +1477,7 @@
       const merged = useRebase
         ? await this.rebaseStart(state, theirs, remote.remote + '/' + branch)
         : await this.performMerge(state, theirs, {
-          label: branch, markerLabel: theirs, suffix: ' of ' + remote.url.replace(/\.git$/, '')
+          label: branch, markerLabel: theirs, logAs: 'pull', suffix: ' of ' + remote.url.replace(/\.git$/, '')
         });
       return { ok: merged.ok, kind: 'pull', out: fetched.concat(merged.out ? [merged.out] : []).join('\n') };
     }

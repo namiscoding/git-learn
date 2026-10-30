@@ -210,6 +210,7 @@
     if (fastForward) {
       await git.writeRef({ ...this.gitArgs, ref: 'refs/heads/' + state.head, value: theirsOid, force: true });
       await git.checkout({ ...this.gitArgs, ref: state.head });
+      this.logHead(theirsOid, (opts.logAs || 'merge ' + label) + ': Fast-forward');
       const stat = await this.changeSummary(before, after);
       return ok('merge', 'Updating ' + oursOid.slice(0, 7) + '..' + theirsOid.slice(0, 7) + '\nFast-forward' + (stat ? '\n' + stat : ''));
     }
@@ -225,6 +226,7 @@
       return fail('merge', res.lines.concat('Automatic merge failed; fix conflicts and then commit the result.').join('\n'));
     }
     const oid = await git.commit({ ...this.gitArgs, author: AUTHOR, message, parent: [oursOid, theirsOid] });
+    this.logHead(oid, (opts.logAs || 'merge ' + label) + ": Merge made by the 'ort' strategy.");
     const stat = await this.changeSummary(before, await this.snapshot(oid));
     const head = res.lines.concat("Merge made by the 'ort' strategy.");
     return ok('merge', head.join('\n') + (stat ? '\n' + stat : ''));
@@ -246,6 +248,7 @@
     const text = message || this.merge.message;
     const oid = await git.commit({ ...this.gitArgs, author: AUTHOR, message: text, parent: [oursOid, this.merge.theirsOid] });
     this.merge = null;
+    this.logHead(oid, 'commit (merge): ' + text.split('\n')[0]);
     return ok('commit', '[' + state.head + ' ' + oid.slice(0, 7) + '] ' + text.split('\n')[0]);
   };
 
@@ -435,6 +438,7 @@
       const before = await this.snapshot(headOid);
       await git.writeRef({ ...this.gitArgs, ref: branchRef, value: target, force: true });
       await git.checkout({ ...this.gitArgs, ref: state.head });
+      this.logHead(target, 'rebase (finish): ' + branchRef + ' onto ' + target);
       void before;
       return ok('rebase', 'Successfully rebased and updated ' + branchRef + '.');
     }
@@ -449,6 +453,7 @@
     };
     // Detach HEAD at the new base and replay one commit at a time.
     await git.writeRef({ ...this.gitArgs, ref: 'HEAD', value: target, force: true });
+    this.logHead(target, 'rebase (start): checkout ' + label);
     await this.restoreTree(target);
     return this.rebaseRun([]);
   };
@@ -484,6 +489,7 @@
     const tip = await this.headOid();
     await git.writeRef({ ...this.gitArgs, ref: 'refs/heads/' + r.branch, value: tip, force: true });
     await git.writeRef({ ...this.gitArgs, ref: 'HEAD', value: 'refs/heads/' + r.branch, symbolic: true, force: true });
+    this.logHead(tip, 'rebase (finish): returning to refs/heads/' + r.branch);
     this.rebase = null;
     return ok('rebase', lines.concat('Successfully rebased and updated refs/heads/' + r.branch + '.').join('\n'));
   };
@@ -499,6 +505,7 @@
     const oid = await git.resolveRef({ ...this.gitArgs, ref: 'refs/heads/rebase-tmp' });
     await git.deleteRef({ ...this.gitArgs, ref: 'refs/heads/rebase-tmp' });
     await git.writeRef({ ...this.gitArgs, ref: 'HEAD', value: oid, force: true });
+    this.logHead(oid, 'rebase (' + (this.unmerged.size === 0 && this.rebase && this.rebase.stopped === c ? 'continue' : 'pick') + '): ' + c.message.split('\n')[0]);
   };
 
   P.rebaseContinue = async function () {
@@ -517,6 +524,24 @@
     this.rebase.done.push(c);
     this.rebase.todo.shift();
     return this.rebaseRun([]);
+  };
+
+  /* ---------- reflog ---------- */
+
+  // git reflog [show]: where HEAD has been, newest first. It is kept only on this computer.
+  P.gitReflog = async function (args) {
+    const rest = args.filter((a) => a !== 'show' && a !== 'HEAD');
+    if (rest.length) return fail('reflog', "error: this course does not support 'git reflog " + rest[0] + "' yet");
+    if (!this.reflog.length) return ok('reflog');
+    const state = await this.getState();
+    const names = (oid) => {
+      const local = state.branches.filter((b) => b.oid === oid).map((b) => b.name);
+      local.sort((a, b) => (a === state.head ? -1 : b === state.head ? 1 : a < b ? -1 : 1));
+      const all = local.map((n) => (n === state.head && !state.detachedOid ? 'HEAD -> ' + n : n))
+        .concat((state.tracking || []).filter((t) => t.oid === oid).map((t) => t.name));
+      return all.length ? ' (' + all.join(', ') + ')' : '';
+    };
+    return ok('reflog', this.reflog.map((e, i) => e.oid.slice(0, 7) + (i === 0 ? names(e.oid) : '') + ' HEAD@{' + i + '}: ' + e.message).join('\n'));
   };
 
   P.rebaseAbort = async function () {
