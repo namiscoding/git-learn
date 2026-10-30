@@ -24,6 +24,13 @@
     '  git commit -m "message"     save the staged changes as a commit',
     '  git log [--oneline]         list saved commits',
     '  git diff [--staged]         show what changed, line by line',
+    '  git branch [name]           list branches, or create one',
+    '  git switch [-c] <branch>    move to a branch (-c creates it)',
+    '  git merge <branch>          bring a branch into the current one',
+    '  git restore [--staged] <f>  undo changes to a file',
+    '  git reset [--soft|--hard] <commit>   move the branch back',
+    '  git revert HEAD             undo a commit by adding a new one',
+    '  git rm [--cached] <file>    stop tracking a file',
     '',
     'Helper commands: touch, echo, cat, ls, rm, clear'
   ].join('\n');
@@ -161,6 +168,38 @@
     });
   }
 
+  // Each commit once, newest first, never a parent before its children (like `git log`).
+  function orderLog(entries) {
+    const byOid = new Map();
+    entries.forEach((e) => { if (!byOid.has(e.oid)) byOid.set(e.oid, e); });
+    // Discovery order: follow first parents first, so ties favour the main line.
+    const order = new Map();
+    const visit = (oid) => {
+      if (order.has(oid) || !byOid.has(oid)) return;
+      order.set(oid, order.size);
+      byOid.get(oid).parents.forEach(visit);
+    };
+    const roots = entries.length ? [entries[0].oid] : [];
+    roots.forEach(visit);
+    byOid.forEach((e, oid) => visit(oid));
+    const waiting = new Map(); // commit -> number of children not yet listed
+    byOid.forEach((e) => waiting.set(e.oid, 0));
+    byOid.forEach((e) => e.parents.forEach((p) => { if (waiting.has(p)) waiting.set(p, waiting.get(p) + 1); }));
+    const out = [];
+    const ready = Array.from(byOid.values()).filter((e) => waiting.get(e.oid) === 0);
+    while (ready.length) {
+      ready.sort((a, b) => b.author.timestamp - a.author.timestamp || order.get(a.oid) - order.get(b.oid));
+      const next = ready.shift();
+      out.push(next);
+      next.parents.forEach((p) => {
+        if (!waiting.has(p)) return;
+        waiting.set(p, waiting.get(p) - 1);
+        if (waiting.get(p) === 0) ready.push(byOid.get(p));
+      });
+    }
+    return out;
+  }
+
   const ok = (kind, out) => ({ ok: true, kind, out: out || '' });
   const fail = (kind, out) => ({ ok: false, kind, out });
 
@@ -216,7 +255,10 @@
 
     // Everything the diagram and the practice checks need to know.
     async getState() {
-      const state = { initialized: this.initialized, branch: 'main', files: [], commits: [] };
+      const state = {
+        initialized: this.initialized, branch: 'main', head: 'main',
+        files: [], commits: [], branches: [], allCommits: []
+      };
       const names = (await this.pfs.readdir(DIR)).filter((n) => n !== '.git');
       if (!this.initialized) {
         state.files = names.sort().map((name) => ({ name, staged: null, work: null, untracked: true, h: 0, w: 2, s: 0 }));
@@ -224,17 +266,30 @@
       }
       const matrix = await git.statusMatrix(this.gitArgs);
       state.files = matrix.map(describe).sort((a, b) => (a.name < b.name ? -1 : 1));
+      state.head = (await git.currentBranch({ ...this.gitArgs, fullname: false })) || 'main';
+      state.branch = state.head;
+      const entry = (e) => ({
+        oid: e.oid,
+        short: e.oid.slice(0, 7),
+        message: e.commit.message.trim(),
+        author: e.commit.author,
+        parents: e.commit.parent
+      });
       try {
-        const log = await git.log(this.gitArgs);
-        state.commits = log.map((e) => ({
-          oid: e.oid,
-          short: e.oid.slice(0, 7),
-          message: e.commit.message.trim(),
-          author: e.commit.author
-        }));
+        state.commits = orderLog((await git.log(this.gitArgs)).map(entry));
       } catch (e) {
         state.commits = [];
       }
+      // Every branch and every commit reachable from one, for the history lanes.
+      const seen = new Map();
+      for (const name of (await git.listBranches(this.gitArgs)).sort()) {
+        const tip = await git.resolveRef({ ...this.gitArgs, ref: 'refs/heads/' + name });
+        state.branches.push({ name, oid: tip });
+        for (const e of await git.log({ ...this.gitArgs, ref: name })) {
+          if (!seen.has(e.oid)) seen.set(e.oid, entry(e));
+        }
+      }
+      state.allCommits = Array.from(seen.values());
       return state;
     }
 
@@ -333,7 +388,8 @@
       const sub = args[0];
       if (!sub) return ok('git', 'usage: git <command>. Type help to see the commands used in this course.');
       if (sub === 'init') return this.gitInit();
-      if (['status', 'add', 'commit', 'log', 'diff'].indexOf(sub) === -1) {
+      const supported = ['status', 'add', 'commit', 'log', 'diff', 'branch', 'switch', 'checkout', 'merge', 'restore', 'reset', 'revert', 'rm'];
+      if (supported.indexOf(sub) === -1) {
         return fail('git', "git: '" + sub + "' is not part of this course yet. Type help to see what works.");
       }
       if (!this.initialized) {
@@ -343,6 +399,13 @@
       if (sub === 'add') return this.gitAdd(args.slice(1));
       if (sub === 'commit') return this.gitCommit(args.slice(1));
       if (sub === 'diff') return this.gitDiff(args.slice(1));
+      if (sub === 'branch') return this.gitBranch(args.slice(1));
+      if (sub === 'switch' || sub === 'checkout') return this.gitSwitch(args.slice(1), sub);
+      if (sub === 'merge') return this.gitMerge(args.slice(1));
+      if (sub === 'restore') return this.gitRestore(args.slice(1));
+      if (sub === 'reset') return this.gitReset(args.slice(1));
+      if (sub === 'revert') return this.gitRevert(args.slice(1));
+      if (sub === 'rm') return this.gitRm(args.slice(1));
       return this.gitLog(args.slice(1));
     }
 
@@ -362,7 +425,7 @@
     }
 
     statusText(state) {
-      const lines = ['On branch main'];
+      const lines = ['On branch ' + state.head];
       const noCommits = state.commits.length === 0;
       if (noCommits) lines.push('', 'No commits yet');
 
@@ -478,7 +541,7 @@
       const oid = await git.commit({ ...this.gitArgs, message, author: AUTHOR });
 
       const summary = await this.commitSummary(staged, parent, oid);
-      const head = '[main ' + (parent ? '' : '(root-commit) ') + oid.slice(0, 7) + '] ' + message.split('\n')[0];
+      const head = '[' + state.head + ' ' + (parent ? '' : '(root-commit) ') + oid.slice(0, 7) + '] ' + message.split('\n')[0];
       return ok('commit', head + '\n' + summary);
     }
 
@@ -601,10 +664,17 @@
       if (bad.length) return fail('log', "fatal: this course does not support '" + bad[0] + "' yet");
       const state = await this.getState();
       if (!state.commits.length) {
-        return fail('log', "fatal: your current branch 'main' does not have any commits yet");
+        return fail('log', "fatal: your current branch '" + state.head + "' does not have any commits yet");
       }
-      const out = state.commits.map((c, i) => {
-        const deco = i === 0 ? ' (HEAD -> main)' : '';
+      // Branch names to show next to a commit, current branch first: (HEAD -> main, feature)
+      const decorate = (oid) => {
+        const names = state.branches.filter((b) => b.oid === oid).map((b) => b.name);
+        names.sort((a, b) => (a === state.head ? -1 : b === state.head ? 1 : a < b ? -1 : 1));
+        if (!names.length) return '';
+        return ' (' + names.map((n) => (n === state.head ? 'HEAD -> ' + n : n)).join(', ') + ')';
+      };
+      const out = state.commits.map((c) => {
+        const deco = decorate(c.oid);
         if (oneline) return c.short + deco + ' ' + c.message.split('\n')[0];
         return [
           'commit ' + c.oid + deco,
@@ -615,6 +685,382 @@
         ].join('\n');
       });
       return ok('log', out.join(oneline ? '\n' : '\n\n'));
+    }
+
+    /* ----- helpers for branches, merging and undoing ----- */
+
+    // Map of path -> blob id for every file in a commit.
+    async snapshot(oid) {
+      if (!oid) return new Map();
+      const found = await git.walk({
+        ...this.gitArgs,
+        trees: [git.TREE({ ref: oid })],
+        map: async (fp, entries) => {
+          if (fp === '.' || !entries[0]) return undefined;
+          if ((await entries[0].type()) !== 'blob') return undefined;
+          return { path: fp, oid: await entries[0].oid() };
+        }
+      });
+      return new Map(found.filter(Boolean).map((f) => [f.path, f.oid]));
+    }
+
+    async blobTextByOid(oid) {
+      if (!oid) return '';
+      const { blob } = await git.readBlob({ ...this.gitArgs, oid });
+      return dec.decode(blob);
+    }
+
+    async parentOf(oid) {
+      const { commit } = await git.readCommit({ ...this.gitArgs, oid });
+      return commit.parent[0] || null;
+    }
+
+    // HEAD, HEAD~2, HEAD^, a branch name, or a (short) commit id -> full id, or null.
+    async resolveCommit(text) {
+      const m = /^([^~^]+)((?:~\d*|\^)*)$/.exec(text);
+      if (!m) return null;
+      let oid = null;
+      try {
+        if (m[1] === 'HEAD') oid = await this.headOid();
+        else {
+          try {
+            oid = await git.resolveRef({ ...this.gitArgs, ref: 'refs/heads/' + m[1] });
+          } catch (e) {
+            oid = await git.expandOid({ ...this.gitArgs, oid: m[1] });
+          }
+        }
+        for (const op of m[2].match(/~\d*|\^/g) || []) {
+          const n = op === '^' ? 1 : parseInt(op.slice(1) || '1', 10);
+          for (let i = 0; i < n && oid; i++) oid = await this.parentOf(oid);
+        }
+      } catch (e) {
+        return null;
+      }
+      return oid;
+    }
+
+    // Is `ancestor` reachable from `oid`?
+    async isAncestor(ancestor, oid) {
+      if (ancestor === oid) return true;
+      const log = await git.log({ ...this.gitArgs, ref: oid });
+      return log.some((e) => e.oid === ancestor);
+    }
+
+    // Per-file line counts between two snapshots, plus the text Git prints for them.
+    async changeSummary(before, after) {
+      const rows = [];
+      const paths = Array.from(new Set([...before.keys(), ...after.keys()])).sort();
+      for (const p of paths) {
+        if (before.get(p) === after.get(p)) continue;
+        const a = toLines(await this.blobTextByOid(before.get(p)));
+        const b = toLines(await this.blobTextByOid(after.get(p)));
+        const same = commonLines(a, b);
+        rows.push({ path: p, ins: b.length - same, del: a.length - same, created: !before.has(p), removed: !after.has(p) });
+      }
+      if (!rows.length) return '';
+      const nameW = Math.max(...rows.map((r) => r.path.length));
+      const numW = Math.max(...rows.map((r) => String(r.ins + r.del).length));
+      const lines = rows.map((r) =>
+        ' ' + r.path.padEnd(nameW) + ' | ' + String(r.ins + r.del).padStart(numW) + ' ' + '+'.repeat(r.ins) + '-'.repeat(r.del));
+      const ins = rows.reduce((n, r) => n + r.ins, 0);
+      const del = rows.reduce((n, r) => n + r.del, 0);
+      const parts = [plural(rows.length, 'file') + ' changed'];
+      if (ins) parts.push(plural(ins, 'insertion') + '(+)');
+      if (del) parts.push(plural(del, 'deletion') + '(-)');
+      if (!ins && !del) parts.push('0 insertions(+)', '0 deletions(-)');
+      lines.push(' ' + parts.join(', '));
+      rows.forEach((r) => {
+        if (r.created) lines.push(' create mode 100644 ' + r.path);
+        if (r.removed) lines.push(' delete mode 100644 ' + r.path);
+      });
+      return lines.join('\n');
+    }
+
+    // Tracked files with uncommitted changes (staged or not).
+    async dirtyFiles() {
+      const state = await this.getState();
+      return state.files.filter((f) => f.staged || f.work).map((f) => f.name);
+    }
+
+    /* ----- branches ----- */
+
+    async gitBranch(args) {
+      const state = await this.getState();
+      const flags = args.filter((a) => a[0] === '-');
+      const names = args.filter((a) => a[0] !== '-');
+
+      if (flags.includes('-d') || flags.includes('-D')) {
+        if (!names.length) return fail('branch', 'fatal: branch name required');
+        const force = flags.includes('-D');
+        const out = [];
+        for (const n of names) {
+          const b = state.branches.find((x) => x.name === n);
+          if (!b) return fail('branch', "error: branch '" + n + "' not found");
+          if (n === state.head) return fail('branch', "error: cannot delete branch '" + n + "' used by worktree at '" + SHOWN_DIR + "'");
+          const headTip = state.commits[0] && state.commits[0].oid;
+          if (!force && !(await this.isAncestor(b.oid, headTip))) {
+            return fail('branch',
+              "error: the branch '" + n + "' is not fully merged.\n" +
+              "hint: If you are sure you want to delete it, run 'git branch -D " + n + "'");
+          }
+          await git.deleteBranch({ ...this.gitArgs, ref: n });
+          out.push('Deleted branch ' + n + ' (was ' + b.oid.slice(0, 7) + ').');
+        }
+        return ok('branch', out.join('\n'));
+      }
+      const unknown = flags.filter((f) => f !== '-d' && f !== '-D');
+      if (unknown.length) return fail('branch', "error: this course does not support the option '" + unknown[0] + "' yet");
+
+      if (!names.length) {
+        const lines = state.branches.map((b) => (b.name === state.head ? '* ' : '  ') + b.name);
+        return ok('branch', lines.join('\n'));
+      }
+      const name = names[0];
+      if (!/^[A-Za-z0-9._\/-]+$/.test(name)) return fail('branch', "fatal: '" + name + "' is not a valid branch name");
+      if (!state.commits.length) return fail('branch', "fatal: not a valid object name: '" + state.head + "'");
+      if (state.branches.some((b) => b.name === name)) return fail('branch', "fatal: a branch named '" + name + "' already exists");
+      await git.branch({ ...this.gitArgs, ref: name });
+      return ok('branch');
+    }
+
+    async gitSwitch(args, cmd) {
+      const flags = args.filter((a) => a[0] === '-');
+      const names = args.filter((a) => a[0] !== '-');
+      const create = flags.includes('-c') || flags.includes('-b');
+      const bad = flags.filter((f) => f !== '-c' && f !== '-b');
+      if (bad.length) return fail('switch', "error: this course does not support the option '" + bad[0] + "' yet");
+      if (!names.length) return fail('switch', cmd === 'switch' ? 'fatal: missing branch or commit argument' : 'fatal: this course needs a branch name after git checkout');
+      const target = names[0];
+      const state = await this.getState();
+      const exists = state.branches.some((b) => b.name === target);
+
+      if (create) {
+        if (!/^[A-Za-z0-9._\/-]+$/.test(target)) return fail('switch', "fatal: '" + target + "' is not a valid branch name");
+        if (exists) return fail('switch', "fatal: a branch named '" + target + "' already exists");
+        if (!state.commits.length) {
+          await git.writeRef({ ...this.gitArgs, ref: 'HEAD', value: 'refs/heads/' + target, symbolic: true, force: true });
+        } else {
+          await git.branch({ ...this.gitArgs, ref: target, checkout: true });
+        }
+        return ok('switch', "Switched to a new branch '" + target + "'");
+      }
+      if (!exists) {
+        return fail('switch', cmd === 'switch'
+          ? "fatal: invalid reference: " + target
+          : "error: pathspec '" + target + "' did not match any file(s) known to git");
+      }
+      if (target === state.head) return ok('switch', "Already on '" + target + "'");
+
+      // Refuse if uncommitted work would be overwritten, like Git does.
+      const dirty = await this.dirtyFiles();
+      if (dirty.length) {
+        const here = await this.snapshot(state.commits[0] && state.commits[0].oid);
+        const there = await this.snapshot(state.branches.find((b) => b.name === target).oid);
+        const clash = dirty.filter((f) => here.get(f) !== there.get(f));
+        if (clash.length) {
+          return fail('switch',
+            'error: Your local changes to the following files would be overwritten by checkout:\n' +
+            clash.map((f) => '\t' + f).join('\n') + '\n' +
+            'Please commit your changes or stash them before you switch branches.\nAborting');
+        }
+      }
+      await git.checkout({ ...this.gitArgs, ref: target });
+      return ok('switch', "Switched to branch '" + target + "'");
+    }
+
+    /* ----- merging ----- */
+
+    async gitMerge(args) {
+      const names = args.filter((a) => a[0] !== '-');
+      const flags = args.filter((a) => a[0] === '-');
+      if (flags.length) return fail('merge', "error: this course does not support the option '" + flags[0] + "' yet");
+      if (!names.length) return fail('merge', 'fatal: specify a branch to merge');
+      const target = names[0];
+      const state = await this.getState();
+      const theirs = state.branches.find((b) => b.name === target);
+      if (!theirs) return fail('merge', 'merge: ' + target + ' - not something we can merge');
+      const oursOid = state.commits[0] && state.commits[0].oid;
+      if (!oursOid) return fail('merge', 'fatal: there is nothing to merge into yet');
+      if (await this.isAncestor(theirs.oid, oursOid)) return ok('merge', 'Already up to date.');
+
+      const before = await this.snapshot(oursOid);
+      const after = await this.snapshot(theirs.oid);
+      const touched = Array.from(new Set([...before.keys(), ...after.keys()])).filter((p) => before.get(p) !== after.get(p));
+      const dirty = (await this.dirtyFiles()).filter((f) => touched.includes(f));
+      if (dirty.length) {
+        return fail('merge',
+          'error: Your local changes to the following files would be overwritten by merge:\n' +
+          dirty.map((f) => '\t' + f).join('\n') + '\n' +
+          'Please commit your changes or stash them before you merge.\nAborting');
+      }
+
+      const fastForward = await this.isAncestor(oursOid, theirs.oid);
+      try {
+        await git.merge({
+          ...this.gitArgs, ours: state.head, theirs: target,
+          author: AUTHOR, message: "Merge branch '" + target + "'", fastForwardOnly: false
+        });
+      } catch (e) {
+        const files = (e && e.data && e.data.filepaths) || [];
+        return fail('merge',
+          files.map((f) => 'CONFLICT (content): Merge conflict in ' + f).join('\n') +
+          '\nAutomatic merge failed; fix conflicts and then commit the result.');
+      }
+      await git.checkout({ ...this.gitArgs, ref: state.head });
+      const newTip = await this.headOid();
+      const stat = await this.changeSummary(before, await this.snapshot(newTip));
+      const head = fastForward
+        ? 'Updating ' + oursOid.slice(0, 7) + '..' + newTip.slice(0, 7) + '\nFast-forward'
+        : "Merge made by the 'ort' strategy.";
+      return ok('merge', head + (stat ? '\n' + stat : ''));
+    }
+
+    /* ----- undoing ----- */
+
+    async gitRestore(args) {
+      const flags = args.filter((a) => a[0] === '-');
+      const paths = args.filter((a) => a[0] !== '-');
+      const staged = flags.includes('--staged') || flags.includes('-S');
+      const bad = flags.filter((f) => !['--staged', '-S', '--worktree', '-W'].includes(f));
+      if (bad.length) return fail('restore', "error: this course does not support the option '" + bad[0] + "' yet");
+      if (!paths.length) return fail('restore', 'fatal: you must specify path(s) to restore');
+      const state = await this.getState();
+      const known = new Set(state.files.filter((f) => !f.untracked || f.staged).map((f) => f.name));
+      let targets = paths;
+      if (paths.includes('.')) targets = Array.from(known);
+      for (const p of targets) {
+        if (!known.has(p)) return fail('restore', "error: pathspec '" + p + "' did not match any file(s) known to git");
+      }
+      for (const p of targets) {
+        if (staged) {
+          if (state.commits.length) await git.resetIndex({ ...this.gitArgs, filepath: p });
+          else await git.remove({ ...this.gitArgs, filepath: p });
+        } else {
+          const text = await this.indexText(p);
+          if (text !== null) await this.pfs.writeFile(DIR + '/' + p, text);
+        }
+      }
+      return ok('restore');
+    }
+
+    async gitReset(args) {
+      const flags = args.filter((a) => a[0] === '-');
+      const rest = args.filter((a) => a[0] !== '-');
+      const modes = ['--soft', '--mixed', '--hard'];
+      const bad = flags.filter((f) => !modes.includes(f));
+      if (bad.length) return fail('reset', "error: this course does not support the option '" + bad[0] + "' yet");
+      const mode = (flags.find((f) => modes.includes(f)) || '--mixed').slice(2);
+      const state = await this.getState();
+      if (!state.commits.length) return fail('reset', "fatal: Failed to resolve 'HEAD' as a valid ref.");
+
+      // "git reset <file>" unstages a file; "git reset <commit>" moves the branch.
+      let target = null;
+      let pathArgs = [];
+      if (rest.length) {
+        target = await this.resolveCommit(rest[0]);
+        if (!target) pathArgs = rest;
+      }
+      if (pathArgs.length) {
+        if (mode !== 'mixed') return fail('reset', 'fatal: Cannot do ' + mode + ' reset with paths.');
+        const known = new Set(state.files.map((f) => f.name));
+        for (const p of pathArgs) {
+          if (!known.has(p)) return fail('reset', "fatal: ambiguous argument '" + p + "': unknown revision or path not in the working tree.");
+        }
+        for (const p of pathArgs) await git.resetIndex({ ...this.gitArgs, filepath: p });
+        return ok('reset');
+      }
+      if (!target) target = state.commits[0].oid;
+
+      const oldSnap = await this.snapshot(state.commits[0].oid);
+      await git.writeRef({ ...this.gitArgs, ref: 'refs/heads/' + state.head, value: target, force: true });
+      const newSnap = await this.snapshot(target);
+      const everyPath = Array.from(new Set([...state.files.map((f) => f.name), ...oldSnap.keys(), ...newSnap.keys()]));
+
+      if (mode === 'hard') {
+        for (const p of everyPath) {
+          const tracked = state.files.some((f) => f.name === p && !f.untracked) || oldSnap.has(p);
+          if (newSnap.has(p)) {
+            await this.pfs.writeFile(DIR + '/' + p, await this.blobTextByOid(newSnap.get(p)));
+            await git.resetIndex({ ...this.gitArgs, filepath: p });
+          } else if (tracked) {
+            if (await this.fileExists(p)) await this.pfs.unlink(DIR + '/' + p);
+            await git.remove({ ...this.gitArgs, filepath: p });
+          }
+        }
+        const { commit } = await git.readCommit({ ...this.gitArgs, oid: target });
+        return ok('reset', 'HEAD is now at ' + target.slice(0, 7) + ' ' + commit.message.trim().split('\n')[0]);
+      }
+      if (mode === 'mixed') {
+        for (const p of everyPath) {
+          const isNewUntracked = state.files.some((f) => f.name === p && f.untracked);
+          if (!isNewUntracked) await git.resetIndex({ ...this.gitArgs, filepath: p });
+        }
+        const after = await this.getState();
+        const left = after.files.filter((f) => f.work);
+        if (left.length) {
+          return ok('reset', 'Unstaged changes after reset:\n' + left.map((f) => (f.work === 'deleted' ? 'D' : 'M') + '\t' + f.name).join('\n'));
+        }
+      }
+      return ok('reset');
+    }
+
+    async gitRevert(args) {
+      const names = args.filter((a) => a[0] !== '-');
+      const flags = args.filter((a) => a[0] !== '-' ? false : a !== '--no-edit');
+      if (flags.length) return fail('revert', "error: this course does not support the option '" + flags[0] + "' yet");
+      if (!names.length) return fail('revert', 'fatal: revert needs a commit, for example: git revert HEAD');
+      const state = await this.getState();
+      if (!state.commits.length) return fail('revert', "fatal: bad revision '" + names[0] + "'");
+      const target = await this.resolveCommit(names[0]);
+      if (!target) return fail('revert', "fatal: bad revision '" + names[0] + "'");
+      if (target !== state.commits[0].oid) {
+        return fail('revert', 'This course can only revert the latest commit: git revert HEAD');
+      }
+      const dirty = await this.dirtyFiles();
+      if (dirty.length) {
+        return fail('revert', 'error: your local changes would be overwritten by revert.\nhint: commit your changes or stash them to proceed.\nfatal: revert failed');
+      }
+      const before = await this.snapshot(target);
+      const parent = await this.parentOf(target);
+      const parentSnap = await this.snapshot(parent);
+      for (const p of new Set([...before.keys(), ...parentSnap.keys()])) {
+        if (before.get(p) === parentSnap.get(p)) continue;
+        if (parentSnap.has(p)) {
+          await this.pfs.writeFile(DIR + '/' + p, await this.blobTextByOid(parentSnap.get(p)));
+          await git.add({ ...this.gitArgs, filepath: p });
+        } else {
+          if (await this.fileExists(p)) await this.pfs.unlink(DIR + '/' + p);
+          await git.remove({ ...this.gitArgs, filepath: p });
+        }
+      }
+      const subject = state.commits[0].message.split('\n')[0];
+      const oid = await git.commit({
+        ...this.gitArgs, author: AUTHOR,
+        message: 'Revert "' + subject + '"\n\nThis reverts commit ' + target + '.\n'
+      });
+      const stat = await this.changeSummary(before, await this.snapshot(oid));
+      const summary = stat.split('\n').filter((l) => /changed|mode/.test(l)).join('\n');
+      return ok('revert', '[' + state.head + ' ' + oid.slice(0, 7) + '] Revert "' + subject + '"\n' + summary);
+    }
+
+    async gitRm(args) {
+      const flags = args.filter((a) => a[0] === '-');
+      const paths = args.filter((a) => a[0] !== '-');
+      const cached = flags.includes('--cached');
+      if (flags.some((f) => f !== '--cached')) return fail('rm', "error: this course does not support the option '" + flags.find((f) => f !== '--cached') + "' yet");
+      if (!paths.length) return fail('rm', 'fatal: No pathspec was given. Which files should I remove?');
+      const state = await this.getState();
+      const tracked = new Set(state.files.filter((f) => f.s !== 0).map((f) => f.name));
+      for (const p of paths) {
+        if (!tracked.has(p)) return fail('rm', "fatal: pathspec '" + p + "' did not match any files");
+      }
+      const out = [];
+      for (const p of paths) {
+        await git.remove({ ...this.gitArgs, filepath: p });
+        if (!cached && (await this.fileExists(p))) await this.pfs.unlink(DIR + '/' + p);
+        out.push("rm '" + p + "'");
+      }
+      return ok('rm', out.join('\n'));
     }
   }
 

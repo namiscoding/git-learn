@@ -275,3 +275,33 @@ a.lesson-card .lesson-tag { background: var(--primary); color: var(--on-primary)
 .note { background: var(--staging-bg); border: 3px solid var(--staging-line); border-radius: 14px; padding: 10px 14px; font-size: .98rem; }
 
 @media (max-width: 480px) { .msg-compare { grid-template-columns: 1fr; } }
+
+/* ---------- history lanes (branch lessons) ---------- */
+.history { opacity: 0; transition: opacity 300ms; }
+.history.visible { opacity: 1; }
+.history rect { fill: #fff; stroke: var(--border); stroke-width: 3; }
+.history-title { font: 700 18px var(--font-head); fill: var(--fg); }
+.history-hint { font: 600 16px var(--font-body); fill: var(--muted); text-anchor: middle; }
+.lane-line { stroke: #c7d2fe; stroke-width: 3; stroke-dasharray: 2 9; stroke-linecap: round; }
+.lane-label { font: 700 14px var(--font-mono); fill: var(--muted); }
+.edge { fill: none; stroke: #64748b; stroke-width: 4; stroke-linecap: round; opacity: 0; }
+.edge.shown { opacity: 1; transition: opacity 400ms ease-out 450ms; }
+.item-branch rect { fill: var(--fg); }
+.item-branch.current rect { fill: var(--primary); }
+.item-commit.lane-1 circle { fill: var(--primary); }
+.item-commit.lane-2 circle { fill: var(--accent); }
+
+/* ---------- lesson 7 and 9 visuals ---------- */
+.mini-graph { width: 100%; height: auto; background: #f8faff; border: 3px solid var(--border); border-radius: var(--radius); padding: 8px; }
+.mini-graph line, .mini-graph path { stroke: #64748b; stroke-width: 4; fill: none; stroke-linecap: round; }
+.mini-graph circle { fill: var(--repo-line); stroke: #fff; stroke-width: 3; }
+.mini-graph circle.alt { fill: var(--primary); }
+.mini-graph .lbl { font: 700 15px var(--font-mono); fill: var(--fg); }
+
+.undo-ladder { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; counter-reset: rung; }
+.undo-ladder li { counter-increment: rung; background: #fff; border: 3px solid var(--border); border-radius: 14px; padding: 10px 14px 10px 52px; position: relative; display: grid; gap: 2px; }
+.undo-ladder li::before { content: counter(rung); position: absolute; left: 14px; top: 10px; font: 700 1.3rem var(--font-head); color: var(--primary-dark); }
+.undo-ladder .where { font-weight: 700; }
+.undo-ladder code { justify-self: start; }
+.undo-ladder small { color: var(--muted); font-size: .92rem; }
+.undo-ladder li:nth-child(4) { border-color: var(--repo-line); background: var(--repo-bg); }
