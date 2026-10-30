@@ -23,6 +23,7 @@
     '  git add <file>              move a change to the staging area',
     '  git commit -m "message"     save the staged changes as a commit',
     '  git log [--oneline]         list saved commits',
+    '  git diff [--staged]         show what changed, line by line',
     '',
     'Helper commands: touch, echo, cat, ls, rm, clear'
   ].join('\n');
@@ -110,6 +111,54 @@
       pad(d.getUTCHours()) + ':' + pad(d.getUTCMinutes()) + ':' + pad(d.getUTCSeconds()) + ' ' +
       d.getUTCFullYear() + ' ' + sign + pad(Math.floor(abs / 60)) + pad(abs % 60)
     );
+  }
+
+  // Unified-diff hunks between two arrays of lines, with 3 lines of context (like `git diff`).
+  function diffHunks(a, b) {
+    const n = a.length;
+    const m = b.length;
+    const dp = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+    for (let i = n - 1; i >= 0; i--) {
+      for (let j = m - 1; j >= 0; j--) {
+        dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+      }
+    }
+    const ops = [];
+    let i = 0;
+    let j = 0;
+    while (i < n || j < m) {
+      if (i < n && j < m && a[i] === b[j]) { ops.push({ t: ' ', s: a[i] }); i++; j++; }
+      else if (j < m && (i === n || dp[i][j + 1] >= dp[i + 1][j])) { ops.push({ t: '+', s: b[j] }); j++; }
+      else { ops.push({ t: '-', s: a[i] }); i++; }
+    }
+
+    const ctx = 3;
+    const ranges = [];
+    ops.forEach((op, k) => {
+      if (op.t === ' ') return;
+      const lo = Math.max(0, k - ctx);
+      const hi = Math.min(ops.length - 1, k + ctx);
+      const last = ranges[ranges.length - 1];
+      if (last && lo <= last[1] + 1) last[1] = hi;
+      else ranges.push([lo, hi]);
+    });
+
+    return ranges.map(([lo, hi]) => {
+      let oldBefore = 0;
+      let newBefore = 0;
+      for (let k = 0; k < lo; k++) {
+        if (ops[k].t !== '+') oldBefore++;
+        if (ops[k].t !== '-') newBefore++;
+      }
+      const slice = ops.slice(lo, hi + 1);
+      const oldCount = slice.filter((o) => o.t !== '+').length;
+      const newCount = slice.filter((o) => o.t !== '-').length;
+      const oldStart = oldCount === 0 ? oldBefore : oldBefore + 1;
+      const newStart = newCount === 0 ? newBefore : newBefore + 1;
+      const span = (start, count) => (count === 1 ? String(start) : start + ',' + count);
+      const head = '@@ -' + span(oldStart, oldCount) + ' +' + span(newStart, newCount) + ' @@';
+      return [head].concat(slice.map((o) => o.t + o.s)).join('\n');
+    });
   }
 
   const ok = (kind, out) => ({ ok: true, kind, out: out || '' });
@@ -284,7 +333,7 @@
       const sub = args[0];
       if (!sub) return ok('git', 'usage: git <command>. Type help to see the commands used in this course.');
       if (sub === 'init') return this.gitInit();
-      if (['status', 'add', 'commit', 'log'].indexOf(sub) === -1) {
+      if (['status', 'add', 'commit', 'log', 'diff'].indexOf(sub) === -1) {
         return fail('git', "git: '" + sub + "' is not part of this course yet. Type help to see what works.");
       }
       if (!this.initialized) {
@@ -293,6 +342,7 @@
       if (sub === 'status') return this.gitStatus();
       if (sub === 'add') return this.gitAdd(args.slice(1));
       if (sub === 'commit') return this.gitCommit(args.slice(1));
+      if (sub === 'diff') return this.gitDiff(args.slice(1));
       return this.gitLog(args.slice(1));
     }
 
@@ -362,6 +412,13 @@
             if (f.untracked || f.work) targets.push(f.name);
           });
         } else if ((await this.fileExists(p)) || known.has(p)) {
+          if (!known.has(p) && (await git.isIgnored({ ...this.gitArgs, filepath: p }))) {
+            return fail('add',
+              'The following paths are ignored by one of your .gitignore files:\n' + p + '\n' +
+              'hint: Use -f if you really want to add them.\n' +
+              'hint: Turn this message off by running\n' +
+              'hint: "git config advice.addIgnoredFile false"');
+          }
           targets.push(p);
         } else {
           return fail('add', "fatal: pathspec '" + p + "' did not match any files");
@@ -454,6 +511,88 @@
       if (del) parts.push(plural(del, 'deletion') + '(-)');
       if (!ins && !del) parts.push('0 insertions(+)', '0 deletions(-)');
       return [' ' + parts.join(', ')].concat(notes).join('\n');
+    }
+
+    /* ----- diff ----- */
+
+    async headOid() {
+      try {
+        return await git.resolveRef({ ...this.gitArgs, ref: 'HEAD' });
+      } catch (e) {
+        return null;
+      }
+    }
+
+    // Text of a file as stored in the staging area, or null if it is not there.
+    async indexText(filepath) {
+      const found = await git.walk({
+        ...this.gitArgs,
+        trees: [git.STAGE()],
+        map: async (fp, entries) => {
+          if (fp !== filepath || !entries[0]) return undefined;
+          return { oid: await entries[0].oid() };
+        }
+      });
+      const hit = found.find(Boolean);
+      if (!hit) return null;
+      const { blob } = await git.readBlob({ ...this.gitArgs, oid: hit.oid });
+      return dec.decode(blob);
+    }
+
+    async headText(filepath) {
+      const head = await this.headOid();
+      if (!head) return null;
+      try {
+        const { blob } = await git.readBlob({ ...this.gitArgs, oid: head, filepath });
+        return dec.decode(blob);
+      } catch (e) {
+        return null;
+      }
+    }
+
+    async shortHash(text) {
+      if (text === null) return '0000000';
+      const { oid } = await git.hashBlob({ object: enc.encode(text) });
+      return oid.slice(0, 7);
+    }
+
+    // Header and hunks for one file, in the format of `git diff`.
+    async fileDiff(name, before, after) {
+      const lines = ['diff --git a/' + name + ' b/' + name];
+      if (before === null) lines.push('new file mode 100644');
+      if (after === null) lines.push('deleted file mode 100644');
+      const a = await this.shortHash(before);
+      const b = await this.shortHash(after);
+      lines.push('index ' + a + '..' + b + (before !== null && after !== null ? ' 100644' : ''));
+      const hunks = diffHunks(toLines(before || ''), toLines(after || ''));
+      if (!hunks.length && before !== null && after !== null) return null;
+      lines.push('--- ' + (before === null ? '/dev/null' : 'a/' + name));
+      lines.push('+++ ' + (after === null ? '/dev/null' : 'b/' + name));
+      return lines.concat(hunks).join('\n');
+    }
+
+    async gitDiff(flags) {
+      const staged = flags.includes('--staged') || flags.includes('--cached');
+      const bad = flags.filter((f) => f !== '--staged' && f !== '--cached');
+      if (bad.length) return fail('diff', "fatal: this course does not support '" + bad[0] + "' yet");
+      const state = await this.getState();
+      const out = [];
+      for (const f of state.files) {
+        let before;
+        let after;
+        if (staged) {
+          if (!f.staged) continue;
+          before = await this.headText(f.name);
+          after = f.staged === 'deleted' ? null : await this.indexText(f.name);
+        } else {
+          if (!f.work) continue;
+          before = await this.indexText(f.name);
+          after = f.work === 'deleted' ? null : await this.readText(f.name);
+        }
+        const d = await this.fileDiff(f.name, before, after);
+        if (d) out.push(d);
+      }
+      return ok('diff', out.join('\n'));
     }
 
     async gitLog(flags) {

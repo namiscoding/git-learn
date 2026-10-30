@@ -172,6 +172,8 @@
 
       const section = h('section', { class: 'slide slide-' + slide.type }, [text]);
 
+      if (slide.note) text.appendChild(h('p', { class: 'note', text: slide.note }));
+
       if (slide.type === 'recap') {
         const list = h('ul', { class: 'recap-list' });
         slide.points.forEach((p) => list.appendChild(h('li', { html: p })));
